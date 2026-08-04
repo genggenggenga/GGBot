@@ -22,9 +22,17 @@ class Skill:
     path: str
     keywords: List[str] = field(default_factory=list)
     agents: List[str] = field(default_factory=list)
+    intents: List[str] = field(default_factory=list)
+    version: str = "1"
+    eval_cases: List[str] = field(default_factory=list)
     enabled: bool = True
 
-    def matches(self, message: str, agent_type: Optional[str] = None) -> bool:
+    def matches(
+        self,
+        message: str,
+        agent_type: Optional[str] = None,
+        intent: Optional[str] = None,
+    ) -> bool:
         """
         判断当前请求是否应该注入这个 Skill。
 
@@ -35,6 +43,9 @@ class Skill:
             return False
 
         if self.agents and agent_type and agent_type.lower() not in self.agents:
+            return False
+
+        if self.intents and intent and intent.lower() not in self.intents:
             return False
 
         if not self.keywords:
@@ -59,6 +70,9 @@ class Skill:
             "path": self.path,
             "keywords": self.keywords,
             "agents": self.agents,
+            "intents": self.intents,
+            "version": self.version,
+            "eval_cases": self.eval_cases,
             "enabled": self.enabled,
             "content_chars": len(self.content),
         }
@@ -119,7 +133,12 @@ class SkillManager:
         """运行时热加载入口，供 API 调用。"""
         return self.load()
 
-    def prompt_for(self, message: str, agent_type: Optional[str] = None) -> str:
+    def prompt_for(
+        self,
+        message: str,
+        agent_type: Optional[str] = None,
+        intent: Optional[str] = None,
+    ) -> str:
         """
         为当前用户请求构建 Skill prompt。
 
@@ -131,7 +150,7 @@ class SkillManager:
         lowered_message = (message or "").lower()
 
         for skill in self._skills:
-            if not skill.matches(message, agent_type):
+            if not skill.matches(message, agent_type, intent):
                 continue
             matched_keywords = [
                 keyword for keyword in skill.keywords
@@ -247,7 +266,10 @@ class SkillManager:
             content=content,
             path=str(path),
             keywords=self._as_list(raw.get("keywords")),
-            agents=[item.lower() for item in self._as_list(raw.get("agents"))],
+            agents=self._normalize_agents(raw.get("agents")),
+            intents=[item.lower() for item in self._as_list(raw.get("intents"))],
+            version=str(raw.get("version") or "1"),
+            eval_cases=self._as_list(raw.get("eval_cases")),
             enabled=self._as_bool(raw.get("enabled"), default=True),
         )
 
@@ -270,7 +292,10 @@ class SkillManager:
             content=body,
             path=str(path),
             keywords=self._as_list(meta.get("keywords")),
-            agents=[item.lower() for item in self._as_list(meta.get("agents"))],
+            agents=self._normalize_agents(meta.get("agents")),
+            intents=[item.lower() for item in self._as_list(meta.get("intents"))],
+            version=str(meta.get("version") or "1"),
+            eval_cases=self._as_list(meta.get("eval_cases")),
             enabled=self._as_bool(meta.get("enabled"), default=True),
         )
 
@@ -336,3 +361,16 @@ class SkillManager:
         if isinstance(value, bool):
             return value
         return str(value).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+    @classmethod
+    def _normalize_agents(cls, value: Any) -> List[str]:
+        aliases = {
+            "general": ["knowledge"],
+            "technical": ["knowledge"],
+            "billing": ["knowledge", "after_sales"],
+        }
+        normalized: List[str] = []
+        for item in cls._as_list(value):
+            name = item.lower()
+            normalized.extend(aliases.get(name, [name]))
+        return list(dict.fromkeys(normalized))

@@ -22,6 +22,10 @@ from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
 
+from core.nlu_fast_track import fast_track_extract, build_understanding_from_fast_track
+from core.nlu_llm import understand_with_llm, make_fallback_understanding
+from core.agent_models import INTENT_SCHEMAS, UnderstandingResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -175,6 +179,51 @@ class IntentRecognizer:
             logger.info(f"学习新样本 → {correct.value}: {message[:40]}")
 
     # ── 三路识别策略 ──────────────────────────────────────────────────────────
+
+    # ── Structured entry point ─────────────────────────────────────────────────
+
+    async def recognize_structured(
+        self,
+        message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+        current_state: Optional[Dict[str, Any]] = None,
+    ) -> UnderstandingResult:
+        """Structured NLU: fast-track first, then single LLM call.
+
+        This returns an UnderstandingResult with intent + slots (one LLM
+        call at most), unlike ``recognize()`` which uses three voting
+        strategies and returns an IntentResult.  The existing
+        ``recognize()`` is unchanged.
+        """
+        # 1. Try deterministic fast-track
+        ft = fast_track_extract(message)
+        result = build_understanding_from_fast_track(ft, message)
+        if result is not None and result.confidence >= 0.9:
+            active_intent = (current_state or {}).get("active_intent")
+            if active_intent and (ft.intent is None or result.corrected_slots):
+                result = result.model_copy(update={
+                    "intents": [active_intent],
+                    "primary_intent": active_intent,
+                    "route_to": INTENT_SCHEMAS[active_intent].allowed_agents[0]
+                    if active_intent in INTENT_SCHEMAS else None,
+                })
+            return result
+
+        # 2. Single structured LLM call (re-uses the Anthropic client)
+        async def _llm_fn(prompt: str) -> str:
+            resp = await self.client.messages.create(
+                model=self.model,
+                max_tokens=512,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return extract_text_content(resp.content)
+
+        try:
+            return await understand_with_llm(message, _llm_fn, current_state)
+        except Exception as ex:
+            logger.warning(f"recognize_structured LLM call failed: {ex}")
+            return make_fallback_understanding(message)
 
     async def _llm_recognize(
         self,

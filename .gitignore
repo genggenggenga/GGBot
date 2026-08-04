@@ -17,8 +17,12 @@ logs/
 # IDE
 .idea/
 .vscode/
+.trae/mcp.json
 *.swp
 *.swo
+.claude
+.trae
+.codex
 
 # OS
 .DS_Store
@@ -30,7 +34,16 @@ build-image*.sh
 # ChromaDB 本地数据
 *.sqlite3
 
+# 本地工具产物
+.coverage
+ai-plugin.json
+ai-plugin-lock.json
+
 # 备份文件
 *~
 *.bak
 docker-compose(1).yml
+.ttadk/
+specs/doc_export/
+
+.mcp.json

@@ -4,27 +4,35 @@
 三级记忆架构，模拟人类记忆机制：
   1. 工作记忆（Redis）—— 当前会话的最近 N 条消息，毫秒级读写
   2. 情景记忆（ChromaDB）—— 跨会话的历史对话，按语义相似度检索
-  3. 用户画像（ChromaDB）—— 从对话中提炼的长期偏好和实体
+  3. 用户画像（ChromaDB）—— 从对话中提炼的长期稳定偏好
 
-关键设计：
-  - 上下文构建时三级记忆融合，按重要性 + 时效性排序
-  - 工作记忆超过阈值时自动压缩（LLM 摘要），防止 context 爆炸
-  - 所有 Embedding 通过 Anthropic API 生成，无本地模型
+关键设计（Task 8 调整后）：
+  - 消息、DialogueState、情景记忆、用户偏好四类数据源边界清晰
+  - 会话摘要采用覆盖式压缩，每次压缩由 LLM 基于旧摘要+新消息生成全新摘要，禁止无限追加
+  - 情景记忆只在任务完成（task_completed）或转人工（handoff）事件触发时写入
+  - 用户画像只记录稳定偏好，订单号/物流号/订单状态等时效事实禁止写入画像
+  - 保持 API 向后兼容，不修改 /chat 调用方式
 """
 import hashlib
+import inspect
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import chromadb
 import redis
 from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
+
+if TYPE_CHECKING:
+    from core.agent_models import DialogueState
+    from core.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +41,12 @@ class MsgRole(Enum):
     USER      = "user"
     ASSISTANT = "assistant"
     SYSTEM    = "system"
+
+
+class EpisodicEventType(str, Enum):
+    """情景记忆写入触发事件类型。"""
+    TASK_COMPLETED = "task_completed"
+    HANDOFF = "handoff"
 
 
 @dataclass
@@ -45,31 +59,93 @@ class Message:
 
 @dataclass
 class MemoryContext:
-    """传给 Agent 的完整上下文。"""
-    recent_messages:  List[Message]   # 工作记忆：最近对话
-    relevant_history: List[str]       # 情景记忆：语义相关的历史片段
-    user_profile:     Dict[str, Any]  # 用户画像：偏好、常用实体
-    summary:          str             # 当前会话摘要（压缩后）
+    """传给 Agent 的完整上下文。四类数据源边界清晰。"""
+    recent_messages:  List[Message]              # 工作记忆：最近对话
+    relevant_history: List[str]                  # 情景记忆：语义相关的历史片段
+    user_profile:     Dict[str, Any]             # 用户画像：长期稳定偏好
+    summary:          str                        # 当前会话摘要（覆盖式压缩，有界）
+    dialogue_state:   Optional["DialogueState"] = None  # DST 结构化业务状态（独立来源）
 
     @staticmethod
     def _clean(text: str) -> str:
         """移除 Unicode 代理字符，防止编码错误。"""
         return text.encode("utf-8", errors="ignore").decode("utf-8")
 
-    def to_prompt_text(self) -> str:
-        """将记忆上下文格式化为 LLM 可用的文本。"""
+    def to_prompt_text(
+        self,
+        skill_prompt: str = "",
+        observations: Optional[List[Any]] = None,
+    ) -> str:
+        """按 Skill、状态、近期消息、相关记忆、Observation 组装上下文。"""
         parts = []
+        if skill_prompt:
+            parts.append(f"[Skills]\n{self._clean(skill_prompt)}")
+        if self.dialogue_state is not None:
+            # Build meaningful state: only include non-default fields.
+            # We compare against known defaults without importing DialogueState at runtime.
+            state_dict = self.dialogue_state.model_dump(exclude_none=True)
+            defaults = {
+                "slots": {},
+                "required_slots": [],
+                "missing_slots": [],
+                "confirmation_status": "not_required",
+                "completed_goals": [],
+                "state_version": 0,
+            }
+            meaningful = {}
+            for k, v in state_dict.items():
+                if k in defaults and v == defaults[k]:
+                    continue
+                meaningful[k] = v
+            if meaningful:
+                parts.append(f"[当前业务状态]\n{json.dumps(meaningful, ensure_ascii=False)}")
+        if self.recent_messages:
+            parts.append("[最近对话]")
+            for m in self.recent_messages:
+                parts.append(f"{m.role.value}: {self._clean(m.content)}")
         if self.summary:
             parts.append(f"[会话摘要]\n{self._clean(self.summary)}")
         if self.relevant_history:
             parts.append("[相关历史]\n" + "\n".join(f"- {self._clean(h)}" for h in self.relevant_history[:3]))
         if self.user_profile:
             parts.append(f"[用户画像]\n{json.dumps(self.user_profile, ensure_ascii=True)}")
-        if self.recent_messages:
-            parts.append("[最近对话]")
-            for m in self.recent_messages:
-                parts.append(f"{m.role.value}: {self._clean(m.content)}")
+        if observations:
+            payload = [
+                item.model_dump(mode="json")
+                if hasattr(item, "model_dump")
+                else item
+                for item in observations
+            ]
+            parts.append(f"[Observations]\n{json.dumps(payload, ensure_ascii=False)}")
         return "\n\n".join(parts)
+
+
+# 时效事实（临时业务数据）模式：这些永远不应写入长期用户画像
+_TRANSIENT_PATTERNS = [
+    # 订单号 / 物流单号 / 退款编号等（前缀后4位以上数字）
+    re.compile(r"\b(ORD|ORDER|SF|JD|YT)\s*-?\s*\d{4,}\b", re.IGNORECASE),
+    re.compile(r"\b\d{10,}\b"),  # 长数字ID
+    # 订单状态等临时状态词
+    re.compile(r"(待发货|已发货|运输中|已签收|退款中|已退款|待审核|处理中|已完成|已取消)"),
+    # 问题/业务细节（一次性业务，不是偏好）
+    re.compile(r"(我的订单|我的快递|订单号|运单号|物流|退款|退货|取消订单|订单|快递|售后|工单)"),
+]
+
+# 稳定偏好关键词：明确表达偏好、习惯、长期选择的语句特征
+_STABLE_PREFERENCE_KEYWORDS = [
+    "我喜欢", "我偏好", "我习惯", "我希望", "请用", "请说", "以后都", "不要给我",
+    "prefer", "like", "always", "never", "please use", "in English", "用中文",
+    "用英文", "用日语", "语言", "联系我", "发短信", "发邮件", "不要打电话",
+]
+
+# 用户画像字段白名单：只有这些字段可以出现在画像中
+_ALLOWED_PROFILE_FIELDS = {
+    "preferences", "language", "communication_preference",
+    "contact_preference", "timezone", "accessibility",
+}
+
+# 摘要最大长度，防止无界增长
+SUMMARY_MAX_CHARS = 600
 
 
 class MemoryManager:
@@ -77,11 +153,17 @@ class MemoryManager:
     三级记忆管理器。
 
     工作记忆存 Redis（TTL 24h），情景记忆和用户画像存 ChromaDB（持久化）。
+    Task 8 关键改动：
+      - 摘要覆盖式压缩（不追加）
+      - 情景记忆事件触发写入（任务完成/转人工）
+      - 用户画像稳定偏好门控
+      - DialogueState 作为独立数据源注入 MemoryContext
     """
 
     WORKING_MAX   = 20    # 工作记忆最大条数，超过则触发压缩
     COMPRESS_AT   = 15    # 达到此条数时压缩，保留摘要 + 最近 5 条
     HISTORY_TOP_K = 5     # 情景记忆检索返回条数
+    KEEP_RECENT   = 5     # 压缩时保留最近消息条数
 
     def __init__(
         self,
@@ -92,35 +174,46 @@ class MemoryManager:
         api_key:      str = "",
         base_url:     Optional[str] = None,
         model:        str = "claude-3-5-sonnet-20241022",
+        state_store:  Optional["StateStore"] = None,
+        # 测试用注入点
+        redis_client: Optional[Any] = None,
+        chroma_client: Optional[Any] = None,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = AsyncAnthropic(**kwargs)
         self._model  = model
+        self._state_store = state_store
 
-        self._redis = redis.from_url(redis_url, decode_responses=True)
+        # Redis 客户端（支持注入 fake）
+        if redis_client is not None:
+            self._redis = redis_client
+        else:
+            self._redis = redis.from_url(redis_url, decode_responses=True)
 
-        # ChromaDB：优先连接独立服务（docker compose 模式），连不上则降级为本地嵌入式
-        try:
-            # HttpClient 默认也会初始化 ChromaDB telemetry；显式关闭避免 posthog 兼容性错误日志。
-            chroma = chromadb.HttpClient(
-                host=chroma_host,
-                port=chroma_port,
-                settings=chromadb.Settings(anonymized_telemetry=False),
-            )
-            chroma.heartbeat()  # 测试连接
-            logger.info(f"ChromaDB 已连接: {chroma_host}:{chroma_port}")
-        except Exception:
-            logger.info(f"ChromaDB 服务不可用，使用本地嵌入式模式: {chroma_path}")
-            chroma = chromadb.PersistentClient(
-                path=chroma_path,
-                settings=chromadb.Settings(anonymized_telemetry=False),
-            )
+        # ChromaDB 客户端（支持注入 fake）
+        if chroma_client is not None:
+            chroma = chroma_client
+        else:
+            try:
+                chroma = chromadb.HttpClient(
+                    host=chroma_host,
+                    port=chroma_port,
+                    settings=chromadb.Settings(anonymized_telemetry=False),
+                )
+                chroma.heartbeat()
+                logger.info(f"ChromaDB 已连接: {chroma_host}:{chroma_port}")
+            except Exception:
+                logger.info(f"ChromaDB 服务不可用，使用本地嵌入式模式: {chroma_path}")
+                chroma = chromadb.PersistentClient(
+                    path=chroma_path,
+                    settings=chromadb.Settings(anonymized_telemetry=False),
+                )
 
-        # 情景记忆：存储历史对话片段
+        # 情景记忆：存储已完成会话/转人工的历史片段
         self._episodic = chroma.get_or_create_collection("episodic")
-        # 用户画像：存储提炼出的偏好和实体
+        # 用户画像：存储稳定偏好
         self._profile  = chroma.get_or_create_collection("user_profile")
 
     # ── 写入 ──────────────────────────────────────────────────────────────────
@@ -133,7 +226,7 @@ class MemoryManager:
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """将一条消息写入工作记忆，超阈值时自动压缩。"""
+        """将一条消息写入工作记忆，超阈值时自动压缩（覆盖式）。"""
         user_id = self._safe_text(user_id)
         conv_id = self._safe_text(conv_id)
         clean_metadata = {
@@ -152,14 +245,15 @@ class MemoryManager:
         }))
         self._redis.expire(key, 86400)  # 24h TTL
 
-        # 超过压缩阈值时触发压缩
+        # 超过压缩阈值时触发覆盖式压缩
         if self._redis.llen(key) >= self.COMPRESS_AT:
             await self._compress(user_id, conv_id)
 
     async def update_profile(self, user_id: str, conv_id: str) -> None:
         """
-        从当前工作记忆中提炼用户偏好，更新用户画像。
-        用 LLM 提炼偏好，然后存入 ChromaDB（ChromaDB 内置 embedding，不依赖外部 API）。
+        从当前工作记忆中提炼**稳定偏好**更新用户画像（带门控）。
+        订单状态、订单号等时效事实不会写入画像。
+        保持旧API签名兼容。
         """
         user_id = self._safe_text(user_id)
         conv_id = self._safe_text(conv_id)
@@ -167,112 +261,214 @@ class MemoryManager:
         if not messages:
             return
 
+        # 快速门控：若最近对话中没有稳定偏好信号，跳过LLM调用
+        recent_text = " ".join(m.content for m in messages[-6:])
+        if not self._has_stable_preference_signal(recent_text):
+            return
+
         text = self._safe_text("\n".join(f"{m.role.value}: {m.content}" for m in messages[-10:]))
-        prompt = f"""从以下对话中提炼用户偏好和关键实体，返回 JSON。
+        prompt = f"""从以下客服对话中，**只提炼用户明确表达的长期稳定偏好**，返回JSON。
+注意：
+- 订单号、物流号、订单状态、当前问题等临时业务信息**绝对不能**包含在内
+- 只保留跨会话仍然有效的偏好，如：语言偏好（中文/英文）、沟通方式（电话/短信/邮件）、
+  称呼、特殊需求（无障碍需求）、明确的喜好/厌恶
+- 如果没有明确的稳定偏好，返回空的 preferences 数组
+
 对话:
 {text}
 
-返回格式: {{"preferences": ["..."], "entities": {{"产品": [], "问题类型": []}}}}"""
+返回格式: {{"preferences": ["..."], "language": "zh/en/...", "communication_preference": "..."}}"""
         prompt = self._safe_text(prompt)
 
         try:
             resp = await self._client.messages.create(
-                model=self._model, max_tokens=512, temperature=0.0,
+                model=self._model, max_tokens=256, temperature=0.0,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
+            if s < 0 or e <= s:
+                return
             profile_data = json.loads(raw[s:e])
 
-            doc_id = f"{user_id}_profile_{conv_id}"
-            doc_text = self._safe_text(json.dumps(profile_data, ensure_ascii=False))
+            # 字段白名单过滤 + 时效事实内容过滤
+            filtered = self._filter_profile_data(profile_data)
+            if not filtered or not any(v for v in filtered.values() if v):
+                return  # 过滤后没有有效偏好，不写入
+
+            # 合并已有画像
+            existing = await self._get_profile(user_id)
+            merged = self._merge_profile(existing, filtered)
+
+            doc_id = f"{user_id}_profile"
+            doc_text = self._safe_text(json.dumps(merged, ensure_ascii=False))
 
             try:
                 self._profile.delete(ids=[doc_id])
             except Exception:
                 pass
 
-            # 直接传 documents，让 ChromaDB 内置模型生成 embedding（不依赖 Voyage API）
             self._profile.add(
                 ids=[doc_id],
                 documents=[doc_text],
-                metadatas=[{"user_id": user_id, "conv_id": conv_id,
-                            "ts": datetime.now().isoformat()}],
+                metadatas=[{"user_id": user_id, "ts": datetime.now().isoformat()}],
             )
-            logger.info(f"用户画像已更新: {user_id}")
+            logger.info(f"用户稳定偏好已更新: {user_id}")
         except Exception as ex:
             logger.warning(f"更新用户画像失败: {ex}")
 
+    async def record_episodic_event(
+        self,
+        user_id: str,
+        conv_id: str,
+        event_type: EpisodicEventType,
+        summary: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        事件触发式写入情景记忆。只在以下时机调用：
+          - 任务完成（TASK_COMPLETED）
+          - 转人工（HANDOFF）
+        压缩工作记忆时**不会**自动写入情景记忆。
+        """
+        user_id = self._safe_text(user_id)
+        conv_id = self._safe_text(conv_id)
+        messages = await self._get_working_memory(user_id, conv_id)
+        existing_summary = self._redis.get(self._summary_key(user_id, conv_id)) or ""
+
+        # 如果没有提供摘要，从最近消息 + 旧摘要生成一个简短摘要
+        if summary is None:
+            full_context = ""
+            if existing_summary:
+                full_context += f"[之前摘要]\n{existing_summary}\n\n"
+            full_context += "[最近对话]\n" + "\n".join(
+                f"{m.role.value}: {m.content}" for m in messages
+            )
+            summary = await self._generate_summary(
+                full_context,
+                max_chars=400,
+                instruction=(
+                    "请用2-4句话总结本次客服会话的核心内容、处理过程和结果。"
+                    "突出用户需求、处理结果、是否完成或转人工。"
+                ),
+                fallback=f"客服会话（{event_type.value}），共{len(messages)}条消息。",
+            )
+
+        event_label = "任务完成" if event_type == EpisodicEventType.TASK_COMPLETED else "转人工"
+        event_summary = self._safe_text(f"[{event_label}] {summary}")
+        full_text = self._safe_text(
+            "\n".join(f"{m.role.value}: {m.content}" for m in messages)
+        )
+
+        await self._store_episodic(
+            user_id=user_id,
+            conv_id=conv_id,
+            text=full_text,
+            summary=event_summary,
+            metadata={
+                "event_type": event_type.value,
+                **(metadata or {}),
+            },
+        )
+        logger.info(f"情景记忆已写入: {user_id}/{conv_id} ({event_type.value})")
+
     # ── 读取 ──────────────────────────────────────────────────────────────────
 
-    async def get_context(self, user_id: str, conv_id: str, query: str = "") -> MemoryContext:
+    async def get_context(
+        self,
+        user_id: str,
+        conv_id: str,
+        query: str = "",
+        dialogue_state: Optional["DialogueState"] = None,
+    ) -> MemoryContext:
         """
         构建完整的记忆上下文。
 
-        query 用于从情景记忆中检索语义相关的历史片段。
+        四类数据源：工作记忆、情景记忆、用户画像、DialogueState（DST）。
+        保持旧签名兼容：不传入 dialogue_state 时若配置了 state_store 会自动加载。
         """
-        # 1. 工作记忆（当前会话最近消息）
         user_id = self._safe_text(user_id)
         conv_id = self._safe_text(conv_id)
         query = self._safe_text(query)
 
+        # 1. 工作记忆（当前会话最近消息）
         recent = await self._get_working_memory(user_id, conv_id)
 
         # 2. 情景记忆（跨会话语义检索）
-        history = await self._search_episodic(user_id, query or (recent[-1].content if recent else ""))
+        history = await self._search_episodic(
+            user_id, query or (recent[-1].content if recent else "")
+        )
 
         # 3. 用户画像
         profile = await self._get_profile(user_id)
 
-        # 4. 会话摘要（如果已压缩过）
+        # 4. 会话摘要（覆盖式，有界）
         summary = self._redis.get(self._summary_key(user_id, conv_id)) or ""
+
+        # 5. DialogueState（DST），独立来源
+        state = dialogue_state
+        if state is None and self._state_store is not None:
+            try:
+                state = await self._state_store.load(user_id, conv_id)
+            except Exception as ex:
+                logger.warning(f"加载 DialogueState 失败: {ex}")
 
         return MemoryContext(
             recent_messages=recent,
             relevant_history=history,
             user_profile=profile,
             summary=summary,
+            dialogue_state=state,
         )
 
-    # ── 压缩（防止 context 爆炸）─────────────────────────────────────────────
+    async def close(self) -> None:
+        """Release the injected or internally-created Redis client."""
+        close = getattr(self._redis, "aclose", None) or getattr(self._redis, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+    # ── 压缩（覆盖式，防止 context 爆炸）─────────────────────────────────────
 
     async def _compress(self, user_id: str, conv_id: str) -> None:
         """
-        工作记忆压缩：
-          1. 用 LLM 对旧消息生成摘要
-          2. 摘要存 Redis（覆盖旧摘要）
-          3. 旧消息存入情景记忆（ChromaDB）供跨会话检索
-          4. 工作记忆只保留最近 5 条
+        工作记忆**覆盖式**压缩：
+          1. 将旧摘要 + 待压缩消息一起交给 LLM 生成**全新**摘要
+          2. 新摘要直接覆盖旧摘要（不追加），并截断到 SUMMARY_MAX_CHARS
+          3. 压缩时**不**写情景记忆（情景记忆仅由任务完成/转人工事件触发）
+          4. 工作记忆只保留最近 KEEP_RECENT 条
         """
         messages = await self._get_working_memory(user_id, conv_id)
         if len(messages) < self.COMPRESS_AT:
             return
 
-        to_compress = messages[:-5]   # 保留最近 5 条
-        keep        = messages[-5:]
+        to_compress = messages[:-self.KEEP_RECENT]
+        keep        = messages[-self.KEEP_RECENT:]
 
-        # LLM 摘要
-        text = self._safe_text("\n".join(f"{m.role.value}: {m.content}" for m in to_compress))
-        prompt = self._safe_text(f"用 2-3 句话总结以下对话的关键信息：\n{text}")
-        try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            summary = self._safe_text(extract_text_content(resp.content)).strip()
-        except Exception:
-            summary = f"对话包含 {len(to_compress)} 条消息（摘要生成失败）"
-
-        # 存摘要到 Redis
+        # 构建输入：旧摘要 + 待压缩消息
         skey = self._summary_key(user_id, conv_id)
         old_summary = self._redis.get(skey) or ""
-        new_summary = self._safe_text(f"{old_summary}\n{summary}").strip()
+
+        parts = []
+        if old_summary:
+            parts.append(f"[之前摘要]\n{old_summary}")
+        parts.append("[新对话]")
+        parts.extend(f"{m.role.value}: {m.content}" for m in to_compress)
+        combined = "\n".join(parts)
+
+        new_summary = await self._generate_summary(
+            combined,
+            max_chars=SUMMARY_MAX_CHARS,
+            instruction="请用简洁、连贯的一段话总结本次客服对话的完整进展，涵盖之前摘要和新对话中的关键信息。控制在200字以内。",
+            fallback=f"对话包含{len(messages)}条消息（摘要生成失败）。",
+        )
+
+        # 直接覆盖旧摘要（核心改动：不追加）
         self._redis.setex(skey, 86400, new_summary)
 
-        # 旧消息存入情景记忆
-        await self._store_episodic(user_id, conv_id, text, summary)
-
-        # 重置工作记忆为最近 5 条
+        # 重置工作记忆为最近 KEEP_RECENT 条
         key = self._wm_key(user_id, conv_id)
         self._redis.delete(key)
         for m in reversed(keep):
@@ -281,7 +477,90 @@ class MemoryManager:
                 "ts": m.timestamp.isoformat(), "metadata": m.metadata,
             }))
         self._redis.expire(key, 86400)
-        logger.info(f"工作记忆压缩完成: {user_id}/{conv_id}，摘要 {len(summary)} 字")
+        logger.info(
+            f"工作记忆覆盖式压缩完成: {user_id}/{conv_id}，摘要 {len(new_summary)} 字"
+        )
+
+    async def _generate_summary(
+        self,
+        text: str,
+        max_chars: int,
+        instruction: str,
+        fallback: str,
+    ) -> str:
+        """调用 LLM 生成摘要，失败时返回 fallback。结果按 max_chars 截断。"""
+        safe_text = self._safe_text(text)
+        prompt = self._safe_text(f"{instruction}\n\n对话：\n{safe_text}")
+        try:
+            resp = await self._client.messages.create(
+                model=self._model, max_tokens=300, temperature=0.0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            summary = self._safe_text(extract_text_content(resp.content)).strip()
+            if not summary:
+                summary = fallback
+        except Exception:
+            summary = fallback
+        # 有界截断：防止摘要无限增长
+        if len(summary) > max_chars:
+            summary = summary[:max_chars].rstrip() + "…"
+        return summary
+
+    # ── 偏好门控辅助 ──────────────────────────────────────────────────────────
+
+    def _has_stable_preference_signal(self, text: str) -> bool:
+        """快速判断文本中是否可能包含稳定偏好信号。"""
+        text_lower = text.lower()
+        return any(kw.lower() in text_lower for kw in _STABLE_PREFERENCE_KEYWORDS)
+
+    def _filter_profile_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """字段白名单 + 内容模式过滤，移除时效事实。"""
+        result: Dict[str, Any] = {}
+        for key, value in data.items():
+            if key not in _ALLOWED_PROFILE_FIELDS:
+                continue
+            if isinstance(value, str):
+                if self._contains_transient(value):
+                    continue
+                result[key] = value
+            elif isinstance(value, list):
+                filtered_list = [
+                    item for item in value
+                    if isinstance(item, str) and not self._contains_transient(item)
+                ]
+                if filtered_list:
+                    result[key] = filtered_list
+            elif isinstance(value, dict):
+                filtered_dict = self._filter_profile_data(value)
+                if filtered_dict:
+                    result[key] = filtered_dict
+            else:
+                result[key] = value
+        return result
+
+    def _contains_transient(self, text: str) -> bool:
+        """判断文本是否包含时效事实（订单号/状态/当前问题等）。"""
+        return any(p.search(text) for p in _TRANSIENT_PATTERNS)
+
+    def _merge_profile(
+        self,
+        existing: Dict[str, Any],
+        new: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """合并新偏好到已有画像，新值优先，列表去重。"""
+        merged = dict(existing)
+        for key, value in new.items():
+            if key == "preferences" and isinstance(value, list):
+                existing_prefs = existing.get("preferences", [])
+                if isinstance(existing_prefs, list):
+                    merged["preferences"] = list(dict.fromkeys(
+                        [*existing_prefs, *value]
+                    ))
+                else:
+                    merged["preferences"] = value
+            else:
+                merged[key] = value
+        return merged
 
     # ── 内部辅助 ──────────────────────────────────────────────────────────────
 
@@ -300,12 +579,11 @@ class MemoryManager:
         return msgs
 
     async def _search_episodic(self, user_id: str, query: str) -> List[str]:
-        """语义检索情景记忆。ChromaDB 内置 embedding，不依赖外部 API。"""
+        """语义检索情景记忆。"""
         query_text = self._safe_text(query).strip()
         if not query_text:
             return []
         try:
-            # 直接传 query_texts，ChromaDB 内置模型自动生成向量做匹配
             results = self._episodic.query(
                 query_texts=[query_text],
                 n_results=self.HISTORY_TOP_K,
@@ -317,26 +595,39 @@ class MemoryManager:
             logger.warning(f"情景记忆检索失败: {ex}")
             return []
 
-    async def _store_episodic(self, user_id: str, conv_id: str, text: str, summary: str) -> None:
-        """将压缩后的对话片段存入情景记忆。ChromaDB 内置 embedding，不依赖外部 API。"""
+    async def _store_episodic(
+        self,
+        user_id: str,
+        conv_id: str,
+        text: str,
+        summary: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """将一段对话摘要存入情景记忆。仅由 record_episodic_event 调用。"""
         try:
             user_id = self._safe_text(user_id)
             conv_id = self._safe_text(conv_id)
             text = self._safe_text(text)
             summary = self._safe_text(summary)
             doc_id = hashlib.md5(f"{user_id}{conv_id}{time.time()}".encode()).hexdigest()
-            # 直接传 documents，ChromaDB 内置模型自动生成 embedding
+            meta = {
+                "user_id": user_id,
+                "conv_id": conv_id,
+                "ts": datetime.now().isoformat(),
+                "full_text": self._safe_text(text[:500]),
+            }
+            if metadata:
+                meta.update(self._safe_metadata_value(metadata))
             self._episodic.add(
                 ids=[doc_id],
                 documents=[summary],
-                metadatas=[{"user_id": user_id, "conv_id": conv_id,
-                            "ts": datetime.now().isoformat(), "full_text": self._safe_text(text[:500])}],
+                metadatas=[meta],
             )
         except Exception as ex:
             logger.warning(f"存储情景记忆失败: {ex}")
 
     async def _get_profile(self, user_id: str) -> Dict[str, Any]:
-        """获取用户画像（取最新一条）。"""
+        """获取用户画像（最新合并结果）。"""
         try:
             results = self._profile.get(where={"user_id": user_id}, limit=1)
             if results["documents"]:

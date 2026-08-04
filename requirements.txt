@@ -2,6 +2,7 @@
 
 # ── AI / LLM ──────────────────────────────────────────────────────────────────
 anthropic==0.40.0          # LLM 调用；意图 Embedding 分支支持远端客户端，缺失时本地兜底
+sentence-transformers==3.3.1  # BGE Embedding 与 Cross-Encoder Reranker
 
 # ── Web 框架 ──────────────────────────────────────────────────────────────────
 fastapi==0.115.5
@@ -21,3 +22,5 @@ httpx==0.28.1              # monitor/performance_monitor.py webhook 告警
 
 # ── 工具 ──────────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
+mcp==1.12.4                # 官方 Model Context Protocol Python SDK
+pypdf==5.1.0               # PDF 知识文档解析
