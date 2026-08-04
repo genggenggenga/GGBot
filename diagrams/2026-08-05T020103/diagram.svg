@@ -1,0 +1,276 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1500" viewBox="0 0 1600 1500">
+  <rect x="0" y="0" width="1600" height="1500" fill="#F6F1E7"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1600" height="100" fill="#102A43"/>
+  <rect x="0" y="96" width="1600" height="4" fill="#22A6A1"/>
+  <text x="52" y="44" font-family="Noto Sans SC" font-size="28" font-weight="700" fill="#FFFFFF">4.3 MCP 与工具安全边界</text>
+  <text x="52" y="75" font-family="Noto Sans SC" font-size="14" fill="#C9D8E6">分层工具调用链 · 授权前置 · 副作用幂等 · 失败结构化返回</text>
+  <rect x="1150" y="26" width="112" height="38" rx="19" fill="#243F5A" stroke="#5D7994"/>
+  <text x="1206" y="50" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="600" fill="#D9E6F2">发现</text>
+  <rect x="1275" y="26" width="112" height="38" rx="19" fill="#614A12" stroke="#D9A62E"/>
+  <text x="1331" y="50" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="600" fill="#FFE5A1">授权</text>
+  <rect x="1400" y="26" width="142" height="38" rx="19" fill="#174D4D" stroke="#2BB5AE"/>
+  <text x="1471" y="50" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="600" fill="#CFF6F2">副作用控制</text>
+
+  <!-- Stage 01 -->
+  <rect x="50" y="122" width="176" height="28" rx="14" fill="#E6E0D3"/>
+  <text x="138" y="141" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#526475">01 · 调用授权边界</text>
+
+  <!-- Agent -->
+  <rect x="50" y="202" width="160" height="128" rx="22" fill="#3949AB"/>
+  <circle cx="92" cy="244" r="21" fill="#5D6BC6"/>
+  <path d="M82 244 L89 251 L103 235" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="130" y="239" font-family="Noto Sans SC" font-size="18" font-weight="700" fill="#FFFFFF">Agent</text>
+  <text x="130" y="262" font-family="Noto Sans SC" font-size="12" fill="#DCE2FF">发起工具调用</text>
+  <rect x="70" y="286" width="120" height="26" rx="13" fill="#2F3D96"/>
+  <text x="130" y="304" text-anchor="middle" font-family="Noto Sans SC" font-size="11" fill="#EEF0FF">ToolCall 请求</text>
+  <polyline points="210,266 245,266" fill="none" stroke="#3949AB" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="245,266 234,260 234,272" fill="#3949AB"/>
+
+  <!-- Registry authorization boundary -->
+  <rect x="250" y="122" width="1300" height="330" rx="24" fill="#FFFCF6" stroke="#CFC6B5" stroke-width="2"/>
+  <rect x="250" y="122" width="1300" height="58" rx="24" fill="#E9E7FB"/>
+  <rect x="250" y="156" width="1300" height="24" fill="#E9E7FB"/>
+  <circle cx="285" cy="151" r="15" fill="#3949AB"/>
+  <path d="M278 151 L283 156 L292 145" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="312" y="149" font-family="Noto Sans SC" font-size="18" font-weight="700" fill="#273A75">ToolRegistry</text>
+  <text x="312" y="168" font-family="Noto Sans SC" font-size="11" fill="#61708C">统一登记 ToolSpec，并在进入 Adapter 前完成授权判定</text>
+  <rect x="1362" y="136" width="158" height="30" rx="15" fill="#3949AB"/>
+  <text x="1441" y="156" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#FFFFFF">授权责任域</text>
+
+  <!-- Authorization gates -->
+  <rect x="282" y="210" width="192" height="94" rx="16" fill="#FFF2C8" stroke="#D99A18" stroke-width="2"/>
+  <circle cx="306" cy="234" r="14" fill="#D99000"/>
+  <text x="306" y="239" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="328" y="235" font-family="Noto Sans SC" font-size="14" font-weight="700" fill="#674A0B">tool exists?</text>
+  <text x="304" y="266" font-family="Noto Sans SC" font-size="12" fill="#725D2B">名称必须已登记</text>
+  <text x="304" y="286" font-family="Noto Sans SC" font-size="11" fill="#8A7442">ToolSpec 可解析</text>
+
+  <polyline points="474,257 494,257" fill="none" stroke="#B7871B" stroke-width="2.5"/>
+  <polygon points="494,257 484,251 484,263" fill="#B7871B"/>
+
+  <rect x="494" y="210" width="192" height="94" rx="16" fill="#FFF2C8" stroke="#D99A18" stroke-width="2"/>
+  <circle cx="518" cy="234" r="14" fill="#D99000"/>
+  <text x="518" y="239" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="540" y="235" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#674A0B">Agent allowlist?</text>
+  <text x="516" y="266" font-family="Noto Sans SC" font-size="12" fill="#725D2B">调用方必须被授权</text>
+  <text x="516" y="286" font-family="Noto Sans SC" font-size="11" fill="#8A7442">按 Agent 收敛能力</text>
+
+  <polyline points="686,257 706,257" fill="none" stroke="#B7871B" stroke-width="2.5"/>
+  <polygon points="706,257 696,251 696,263" fill="#B7871B"/>
+
+  <rect x="706" y="210" width="226" height="94" rx="16" fill="#FFF2C8" stroke="#D99A18" stroke-width="2"/>
+  <circle cx="730" cy="234" r="14" fill="#D99000"/>
+  <text x="730" y="239" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="752" y="235" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#674A0B">WRITE 携带 action_id?</text>
+  <text x="728" y="266" font-family="Noto Sans SC" font-size="12" fill="#725D2B">写操作必须绑定动作标识</text>
+  <text x="728" y="286" font-family="Noto Sans SC" font-size="11" fill="#8A7442">READ 跳过此项</text>
+
+  <polyline points="932,257 952,257" fill="none" stroke="#B7871B" stroke-width="2.5"/>
+  <polygon points="952,257 942,251 942,263" fill="#B7871B"/>
+
+  <rect x="952" y="210" width="226" height="94" rx="16" fill="#FFF2C8" stroke="#D99A18" stroke-width="2"/>
+  <circle cx="976" cy="234" r="14" fill="#D99000"/>
+  <text x="976" y="239" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#FFFFFF">4</text>
+  <text x="998" y="235" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#674A0B">action_id CONFIRMED?</text>
+  <text x="974" y="266" font-family="Noto Sans SC" font-size="12" fill="#725D2B">确认状态必须已落定</text>
+  <text x="974" y="286" font-family="Noto Sans SC" font-size="11" fill="#8A7442">拒绝未确认副作用</text>
+
+  <polyline points="1178,257 1198,257" fill="none" stroke="#148C88" stroke-width="2.5"/>
+  <polygon points="1198,257 1188,251 1188,263" fill="#148C88"/>
+
+  <rect x="1198" y="210" width="206" height="94" rx="16" fill="#DDF4EF" stroke="#159A93" stroke-width="2"/>
+  <circle cx="1224" cy="234" r="15" fill="#159A93"/>
+  <path d="M1217 234 L1222 239 L1231 228" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="1248" y="235" font-family="Noto Sans SC" font-size="14" font-weight="700" fill="#0F625F">授权通过</text>
+  <text x="1220" y="266" font-family="Noto Sans SC" font-size="12" fill="#276E6B">交给 Adapter 执行</text>
+  <text x="1220" y="286" font-family="Noto Sans SC" font-size="11" fill="#4F7D7A">Registry 不做副作用</text>
+
+  <!-- Unified rejection result -->
+  <polyline points="378,304 378,370 1198,370" fill="none" stroke="#C43D3D" stroke-width="2"/>
+  <polyline points="590,304 590,370" fill="none" stroke="#C43D3D" stroke-width="2"/>
+  <polyline points="819,304 819,370" fill="none" stroke="#C43D3D" stroke-width="2"/>
+  <polyline points="1065,304 1065,370" fill="none" stroke="#C43D3D" stroke-width="2"/>
+  <circle cx="378" cy="326" r="9" fill="#C43D3D"/>
+  <text x="378" y="330" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#FFFFFF">×</text>
+  <circle cx="590" cy="326" r="9" fill="#C43D3D"/>
+  <text x="590" y="330" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#FFFFFF">×</text>
+  <circle cx="819" cy="326" r="9" fill="#C43D3D"/>
+  <text x="819" y="330" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#FFFFFF">×</text>
+  <circle cx="1065" cy="326" r="9" fill="#C43D3D"/>
+  <text x="1065" y="330" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#FFFFFF">×</text>
+  <polygon points="1198,370 1188,364 1188,376" fill="#C43D3D"/>
+  <rect x="1198" y="338" width="206" height="64" rx="13" fill="#FBE4E4" stroke="#C43D3D" stroke-width="2"/>
+  <text x="1216" y="363" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#9E2F2F">结构化 ToolResult</text>
+  <text x="1216" y="384" font-family="Noto Sans SC" font-size="10" fill="#A64C4C">ok=false · code · message · stage</text>
+
+  <!-- Pass route to adapter -->
+  <polyline points="1301,304 1301,426 538,426 538,536" fill="none" stroke="#159A93" stroke-width="3"/>
+  <polygon points="538,536 532,525 544,525" fill="#159A93"/>
+
+  <!-- Stage 02 -->
+  <rect x="50" y="478" width="226" height="28" rx="14" fill="#E6E0D3"/>
+  <text x="163" y="497" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#526475">02 · 协议执行与副作用边界</text>
+  <text x="1520" y="498" text-anchor="end" font-family="Noto Sans SC" font-size="11" fill="#738292">按真实调用顺序折返分层</text>
+
+  <!-- Local adapter comparison -->
+  <rect x="50" y="536" width="280" height="500" rx="24" fill="#EEF1F7" stroke="#8A99AA" stroke-width="2" stroke-dasharray="8 6"/>
+  <rect x="72" y="558" width="82" height="24" rx="12" fill="#DDE4EC"/>
+  <text x="113" y="575" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#526475">本地对照</text>
+  <text x="72" y="618" font-family="Noto Sans SC" font-size="19" font-weight="700" fill="#33485C">LocalToolAdapter</text>
+  <text x="72" y="643" font-family="Noto Sans SC" font-size="12" fill="#66798B">本地工具的完整韧性能力</text>
+  <rect x="72" y="680" width="110" height="38" rx="19" fill="#FFFFFF" stroke="#9AA8B7"/>
+  <text x="127" y="705" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="600" fill="#42576B">TTL cache</text>
+  <rect x="194" y="680" width="110" height="38" rx="19" fill="#FFFFFF" stroke="#9AA8B7"/>
+  <text x="249" y="705" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="600" fill="#42576B">fallback</text>
+  <rect x="72" y="748" width="232" height="82" rx="14" fill="#FFFFFF" stroke="#9AA8B7"/>
+  <text x="188" y="777" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#42576B">熔断状态机</text>
+  <text x="188" y="805" text-anchor="middle" font-family="Noto Sans SC" font-size="11" fill="#65798D">CLOSED / OPEN / HALF_OPEN</text>
+  <rect x="72" y="858" width="232" height="42" rx="21" fill="#FFFFFF" stroke="#9AA8B7"/>
+  <text x="188" y="885" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="600" fill="#42576B">调用统计</text>
+  <line x1="72" y1="930" x2="304" y2="930" stroke="#CBD3DC"/>
+  <circle cx="80" cy="966" r="5" fill="#C47A20"/>
+  <text x="94" y="970" font-family="Noto Sans SC" font-size="11" font-weight="600" fill="#9A5B16">MCP Adapter 尚未完整复用</text>
+  <polyline points="330,720 372,720" fill="none" stroke="#7C8D9E" stroke-width="2" stroke-dasharray="6 5"/>
+  <polygon points="372,720 362,714 362,726" fill="#7C8D9E"/>
+
+  <!-- Protocol execution canvas -->
+  <rect x="372" y="536" width="1178" height="500" rx="26" fill="#FFFCF6" stroke="#D5CCBB" stroke-width="2"/>
+  <rect x="396" y="558" width="210" height="26" rx="13" fill="#E4F4F1"/>
+  <text x="501" y="576" text-anchor="middle" font-family="Noto Sans SC" font-size="11" font-weight="700" fill="#28716D">上层 · 适配与传输</text>
+  <rect x="396" y="798" width="210" height="26" rx="13" fill="#E4F4F1"/>
+  <text x="501" y="816" text-anchor="middle" font-family="Noto Sans SC" font-size="11" font-weight="700" fill="#28716D">下层 · 会话与执行</text>
+
+  <!-- MCP Tool Adapter -->
+  <rect x="396" y="608" width="284" height="166" rx="22" fill="#E8EAFB" stroke="#3949AB" stroke-width="2"/>
+  <rect x="396" y="608" width="284" height="48" rx="22" fill="#3949AB"/>
+  <rect x="396" y="635" width="284" height="21" fill="#3949AB"/>
+  <text x="538" y="638" text-anchor="middle" font-family="Noto Sans SC" font-size="17" font-weight="700" fill="#FFFFFF">MCPToolAdapter</text>
+  <circle cx="426" cy="686" r="14" fill="#5B68C4"/>
+  <text x="426" y="691" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="450" y="682" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#34427D">参数校验</text>
+  <text x="450" y="701" font-family="Noto Sans SC" font-size="10" fill="#67739B">按 ToolSpec schema 拒绝非法输入</text>
+  <circle cx="426" cy="728" r="14" fill="#5B68C4"/>
+  <text x="426" y="733" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="450" y="724" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#34427D">asyncio timeout</text>
+  <text x="450" y="743" font-family="Noto Sans SC" font-size="10" fill="#67739B">限制单次远端工具调用时长</text>
+  <rect x="414" y="752" width="248" height="16" rx="8" fill="#D6DAF7"/>
+  <text x="538" y="764" text-anchor="middle" font-family="Noto Sans SC" font-size="9" fill="#43528E">协议适配，不承担授权决策</text>
+
+  <!-- MCP Client -->
+  <polyline points="680,691 730,691" fill="none" stroke="#167F80" stroke-width="3"/>
+  <polygon points="730,691 719,685 719,697" fill="#167F80"/>
+  <rect x="730" y="622" width="224" height="138" rx="20" fill="#DDF4EF" stroke="#168E89" stroke-width="2"/>
+  <circle cx="764" cy="656" r="17" fill="#168E89"/>
+  <path d="M755 656 L761 662 L773 649" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="788" y="661" font-family="Noto Sans SC" font-size="16" font-weight="700" fill="#155F5D">MCPClient</text>
+  <text x="752" y="693" font-family="Noto Sans SC" font-size="11" fill="#376F6D">管理连接生命周期</text>
+  <text x="752" y="714" font-family="Noto Sans SC" font-size="11" fill="#376F6D">封装请求与响应</text>
+  <rect x="752" y="728" width="180" height="20" rx="10" fill="#C8EAE4"/>
+  <text x="842" y="742" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="600" fill="#246D69">MCP 协议客户端</text>
+
+  <!-- stdio transport -->
+  <polyline points="954,691 1004,691" fill="none" stroke="#167F80" stroke-width="3"/>
+  <polygon points="1004,691 993,685 993,697" fill="#167F80"/>
+  <rect x="1004" y="636" width="220" height="110" rx="55" fill="#0F8B8D"/>
+  <circle cx="1040" cy="676" r="15" fill="#42B7B2"/>
+  <text x="1040" y="681" text-anchor="middle" font-family="Noto Sans SC" font-size="15" font-weight="700" fill="#FFFFFF">&gt;_</text>
+  <text x="1066" y="676" font-family="Noto Sans SC" font-size="15" font-weight="700" fill="#FFFFFF">stdio</text>
+  <text x="1066" y="696" font-family="Noto Sans SC" font-size="11" fill="#CFF5F1">transport</text>
+  <text x="1114" y="722" text-anchor="middle" font-family="Noto Sans SC" font-size="10" fill="#E5FFFC">进程间双向通信</text>
+
+  <!-- Fold to lower execution layer -->
+  <polyline points="1224,691 1280,691 1280,846 778,846" fill="none" stroke="#167F80" stroke-width="3"/>
+  <polygon points="778,846 789,840 789,852" fill="#167F80"/>
+  <rect x="1244" y="758" width="72" height="24" rx="12" fill="#D6EEE9"/>
+  <text x="1280" y="775" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#28716D">建立会话</text>
+
+  <!-- Client Session -->
+  <rect x="396" y="842" width="382" height="166" rx="22" fill="#E7F6F3" stroke="#168E89" stroke-width="2"/>
+  <rect x="418" y="860" width="338" height="38" rx="19" fill="#168E89"/>
+  <text x="587" y="885" text-anchor="middle" font-family="Noto Sans SC" font-size="16" font-weight="700" fill="#FFFFFF">ClientSession</text>
+  <polyline points="448,922 448,978" fill="none" stroke="#83BDB8" stroke-width="3"/>
+  <circle cx="448" cy="922" r="13" fill="#0F8B8D"/>
+  <text x="448" y="926" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="472" y="926" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#245E5C">initialize</text>
+  <text x="560" y="926" font-family="Noto Sans SC" font-size="10" fill="#58817F">建立协议会话</text>
+  <circle cx="448" cy="950" r="13" fill="#0F8B8D"/>
+  <text x="448" y="954" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="472" y="954" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#245E5C">list_tools</text>
+  <text x="560" y="954" font-family="Noto Sans SC" font-size="10" fill="#58817F">启动期发现工具</text>
+  <circle cx="448" cy="978" r="13" fill="#0F8B8D"/>
+  <text x="448" y="982" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="472" y="982" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#245E5C">call_tool</text>
+  <text x="560" y="982" font-family="Noto Sans SC" font-size="10" fill="#58817F">运行期调用工具</text>
+
+  <!-- FastMCP Server -->
+  <polyline points="778,925 828,925" fill="none" stroke="#167F80" stroke-width="3"/>
+  <polygon points="828,925 817,919 817,931" fill="#167F80"/>
+  <rect x="828" y="818" width="690" height="190" rx="24" fill="#F1FBF8" stroke="#0F8B8D" stroke-width="2.5"/>
+  <rect x="828" y="818" width="690" height="48" rx="24" fill="#0F8B8D"/>
+  <rect x="828" y="844" width="690" height="22" fill="#0F8B8D"/>
+  <text x="1173" y="850" text-anchor="middle" font-family="Noto Sans SC" font-size="18" font-weight="700" fill="#FFFFFF">FastMCP Server</text>
+  <text x="854" y="892" font-family="Noto Sans SC" font-size="11" font-weight="700" fill="#3A6C69">READ 工具</text>
+  <rect x="854" y="904" width="196" height="30" rx="15" fill="#D7F0EB"/>
+  <text x="952" y="924" text-anchor="middle" font-family="Noto Sans SC" font-size="11" fill="#245E5C">query_order</text>
+  <rect x="1062" y="904" width="196" height="30" rx="15" fill="#D7F0EB"/>
+  <text x="1160" y="924" text-anchor="middle" font-family="Noto Sans SC" font-size="11" fill="#245E5C">track_package</text>
+  <rect x="1270" y="904" width="222" height="30" rx="15" fill="#D7F0EB"/>
+  <text x="1381" y="924" text-anchor="middle" font-family="Noto Sans SC" font-size="11" fill="#245E5C">check_refund_eligibility</text>
+  <text x="854" y="962" font-family="Noto Sans SC" font-size="11" font-weight="700" fill="#9A5B16">WRITE 工具</text>
+  <rect x="954" y="946" width="144" height="28" rx="14" fill="#FFE6B5" stroke="#D88A00"/>
+  <text x="1026" y="965" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="600" fill="#774B00">create_refund</text>
+  <rect x="1110" y="946" width="144" height="28" rx="14" fill="#FFE6B5" stroke="#D88A00"/>
+  <text x="1182" y="965" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="600" fill="#774B00">create_ticket</text>
+  <rect x="1270" y="946" width="222" height="28" rx="14" fill="#F8D7D7"/>
+  <text x="1381" y="965" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#9F3535">按 action_id 进程内幂等</text>
+
+  <!-- Stage 03 -->
+  <rect x="50" y="1080" width="226" height="28" rx="14" fill="#E6E0D3"/>
+  <text x="163" y="1099" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#526475">03 · 启动发现与应用侧分级</text>
+
+  <!-- Discovery loop -->
+  <rect x="50" y="1126" width="1500" height="224" rx="26" fill="#ECF8F5" stroke="#65AAA5" stroke-width="2"/>
+  <text x="78" y="1160" font-family="Noto Sans SC" font-size="14" font-weight="700" fill="#2D6C68">启动期 · 从协议元数据到 Registry 风险等级</text>
+  <text x="1520" y="1160" text-anchor="end" font-family="Noto Sans SC" font-size="11" fill="#63827F">由 Server 发起发现结果，应用侧补充分级策略</text>
+
+  <rect x="94" y="1202" width="224" height="56" rx="28" fill="#0F8B8D"/>
+  <text x="206" y="1236" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#FFFFFF">Server: list_tools</text>
+  <polyline points="318,1230 370,1230" fill="none" stroke="#168E89" stroke-width="3"/>
+  <polygon points="370,1230 359,1224 359,1236" fill="#168E89"/>
+
+  <rect x="370" y="1202" width="252" height="56" rx="28" fill="#D9EFEB" stroke="#168E89" stroke-width="1.5"/>
+  <text x="496" y="1236" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#285F5C">动态生成 ToolSpec</text>
+  <polyline points="622,1230 674,1230" fill="none" stroke="#168E89" stroke-width="3"/>
+  <polygon points="674,1230 663,1224 663,1236" fill="#168E89"/>
+
+  <rect x="674" y="1202" width="392" height="56" rx="28" fill="#FFF0C6" stroke="#D99000" stroke-width="1.5"/>
+  <text x="870" y="1236" text-anchor="middle" font-family="Noto Sans SC" font-size="12" font-weight="700" fill="#745000">create_refund / create_ticket → WRITE</text>
+  <polyline points="1066,1230 1118,1230" fill="none" stroke="#168E89" stroke-width="3"/>
+  <polygon points="1118,1230 1107,1224 1107,1236" fill="#168E89"/>
+
+  <rect x="1118" y="1202" width="256" height="56" rx="28" fill="#D9EFEB" stroke="#168E89" stroke-width="1.5"/>
+  <text x="1246" y="1236" text-anchor="middle" font-family="Noto Sans SC" font-size="13" font-weight="700" fill="#285F5C">其余工具 → READ</text>
+  <polyline points="1374,1230 1456,1230 1456,1288 206,1288 206,1258" fill="none" stroke="#168E89" stroke-width="2.5" stroke-dasharray="8 6"/>
+  <polygon points="206,1258 200,1269 212,1269" fill="#168E89"/>
+  <rect x="596" y="1275" width="316" height="26" rx="13" fill="#D5EDE9"/>
+  <text x="754" y="1293" text-anchor="middle" font-family="Noto Sans SC" font-size="10" font-weight="700" fill="#3A7470">补充风险等级后登记到 ToolRegistry</text>
+  <text x="78" y="1330" font-family="Noto Sans SC" font-size="11" fill="#63827F">协议只提供工具元数据；READ / WRITE 风险等级由应用侧策略补充后登记到 Registry。</text>
+
+  <!-- Core conclusion -->
+  <rect x="50" y="1384" width="1500" height="76" rx="20" fill="#102A43"/>
+  <rect x="72" y="1409" width="94" height="28" rx="14" fill="#25445F"/>
+  <text x="119" y="1428" text-anchor="middle" font-family="Noto Sans SC" font-size="11" font-weight="700" fill="#CFE0EE">核心结论</text>
+  <circle cx="214" cy="1422" r="5" fill="#2BB5AE"/>
+  <text x="231" y="1428" font-family="Noto Sans SC" font-size="15" font-weight="700" fill="#FFFFFF">协议负责发现</text>
+  <polyline points="364,1422 408,1422" fill="none" stroke="#6E879D" stroke-width="2"/>
+  <polygon points="408,1422 398,1416 398,1428" fill="#6E879D"/>
+  <circle cx="460" cy="1422" r="5" fill="#E0A521"/>
+  <text x="477" y="1428" font-family="Noto Sans SC" font-size="15" font-weight="700" fill="#FFFFFF">Registry 负责授权</text>
+  <polyline points="670,1422 714,1422" fill="none" stroke="#6E879D" stroke-width="2"/>
+  <polygon points="714,1422 704,1416 704,1428" fill="#6E879D"/>
+  <circle cx="766" cy="1422" r="5" fill="#E05555"/>
+  <text x="783" y="1428" font-family="Noto Sans SC" font-size="15" font-weight="700" fill="#FFFFFF">Server 负责副作用幂等</text>
+  <text x="1518" y="1427" text-anchor="end" font-family="Noto Sans SC" font-size="11" fill="#AFC3D4">Discovery ≠ Authorization ≠ Execution</text>
+</svg>

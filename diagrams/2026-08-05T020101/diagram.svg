@@ -1,0 +1,305 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1500" viewBox="0 0 1600 1500">
+  <defs>
+    <linearGradient id="nluFlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3F46B8"/>
+      <stop offset="100%" stop-color="#5664D7"/>
+    </linearGradient>
+    <linearGradient id="stateFlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#087F78"/>
+      <stop offset="100%" stop-color="#129A8D"/>
+    </linearGradient>
+    <linearGradient id="reducerFlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#142E52"/>
+      <stop offset="100%" stop-color="#253F73"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Canvas -->
+  <rect x="0" y="0" width="1600" height="1500" fill="#F7F2E8"/>
+  <path d="M0 690 C330 650 560 730 850 688 C1120 650 1355 670 1600 620"
+        fill="none" stroke="#DED6C4" stroke-width="2"/>
+
+  <!-- Header -->
+  <rect x="0" y="0" width="1600" height="92" fill="#102B4C"/>
+  <rect x="0" y="88" width="1600" height="4" fill="#4F5FD2"/>
+  <circle cx="57" cy="46" r="19" fill="#5364D8"/>
+  <path d="M48 46 H66 M57 37 V55" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <text x="92" y="42" font-family="Noto Sans SC, sans-serif" font-size="29" font-weight="700" fill="#FFFFFF">4.1 NLU 与 Dialogue State Tracking</text>
+  <text x="92" y="69" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="500" fill="#C8D5E6">双路语义结构化 · 强类型契约 · 确定性状态归约</text>
+  <rect x="1332" y="27" width="218" height="38" rx="19" fill="#1C3B64" stroke="#4A6587" stroke-width="1.5"/>
+  <circle cx="1360" cy="46" r="6" fill="#35C2A7"/>
+  <text x="1377" y="52" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#EAF2FA">Turn-level 状态契约</text>
+
+  <!-- Section labels -->
+  <text x="42" y="126" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" letter-spacing="2" fill="#40516B">A · NLU 语义结构化</text>
+  <line x1="42" y1="137" x2="1558" y2="137" stroke="#D9D0BF" stroke-width="1.5"/>
+  <text x="42" y="755" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" letter-spacing="2" fill="#40516B">B · DIALOGUE STATE TRACKING</text>
+  <line x1="42" y1="766" x2="1558" y2="766" stroke="#D9D0BF" stroke-width="1.5"/>
+
+  <!-- User input -->
+  <g>
+    <rect x="42" y="194" width="168" height="78" rx="39" fill="#FFFFFF" stroke="#BFC8D1" stroke-width="2"/>
+    <circle cx="78" cy="233" r="19" fill="#E9EEF7"/>
+    <path d="M69 225 H87 M69 233 H83 M69 241 H79" stroke="#375A82" stroke-width="2.4" stroke-linecap="round"/>
+    <text x="106" y="226" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#66758A">原始消息</text>
+    <text x="106" y="250" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#17304F">用户输入</text>
+  </g>
+
+  <!-- Input connector -->
+  <line x1="210" y1="233" x2="232" y2="233" stroke="#697B90" stroke-width="3"/>
+  <polygon points="244,233 232,226 232,240" fill="#697B90"/>
+
+  <!-- Signal gate -->
+  <g>
+    <polygon points="292,174 352,233 292,292 232,233" fill="#F6C55A" stroke="#B87818" stroke-width="2"/>
+    <circle cx="292" cy="217" r="12" fill="#FFF6D9"/>
+    <path d="M286 217 H298 M292 211 V223" stroke="#9A6214" stroke-width="2" stroke-linecap="round"/>
+    <text x="292" y="248" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#5D3B0A">信号充足？</text>
+    <text x="292" y="267" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#73501A">确定性优先</text>
+  </g>
+
+  <!-- Fast-track branch -->
+  <polyline points="352,233 370,233 370,365 376,365" fill="none" stroke="#4D59C8" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="388,365 376,358 376,372" fill="#4D59C8"/>
+  <rect x="337" y="276" width="67" height="24" rx="12" fill="#E7E7FB"/>
+  <text x="370" y="293" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#4A50B1">是 / 快路</text>
+
+  <g transform="translate(0 180)">
+    <path d="M410 116 H690 Q712 116 712 138 V233 Q712 255 690 255 H410 Q388 255 388 233 V138 Q388 116 410 116 Z"
+          fill="url(#nluFlow)" stroke="#333B9C" stroke-width="2"/>
+    <circle cx="431" cy="153" r="20" fill="#FFFFFF" opacity="0.16"/>
+    <path d="M421 148 H441 M421 155 H437 M421 162 H433" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"/>
+    <text x="466" y="146" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#DCE1FF">REGEX FAST-TRACK</text>
+    <text x="466" y="172" font-family="Noto Sans SC, sans-serif" font-size="20" font-weight="700" fill="#FFFFFF">确定性提取</text>
+    <rect x="414" y="190" width="73" height="25" rx="12.5" fill="#FFFFFF" opacity="0.16"/>
+    <text x="451" y="207" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#FFFFFF">意图</text>
+    <rect x="494" y="190" width="92" height="25" rx="12.5" fill="#FFFFFF" opacity="0.16"/>
+    <text x="540" y="207" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#FFFFFF">订单号</text>
+    <rect x="593" y="190" width="92" height="25" rx="12.5" fill="#FFFFFF" opacity="0.16"/>
+    <text x="639" y="207" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#FFFFFF">运单号</text>
+    <text x="414" y="238" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="500" fill="#EEF0FF">confirm / reject / correction · 无模型调用</text>
+  </g>
+
+  <!-- Fast-track to contract -->
+  <polyline points="712,365 779,365 779,405 1250,405" fill="none" stroke="#4D59C8" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="1262,405 1250,398 1250,412" fill="#4D59C8"/>
+  <rect x="802" y="386" width="111" height="25" rx="12.5" fill="#E7E7FB"/>
+  <text x="858" y="403" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#4A50B1">直接构建契约</text>
+
+  <!-- Slow-track branch -->
+  <polyline points="292,292 292,550 382,550" fill="none" stroke="#8B6A2B" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="394,550 382,543 382,557" fill="#8B6A2B"/>
+  <rect x="259" y="438" width="79" height="24" rx="12" fill="#F8E8BD"/>
+  <text x="298" y="455" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#80591B">否 / 慢路</text>
+
+  <g transform="translate(0 208)">
+    <rect x="394" y="292" width="248" height="100" rx="24" fill="#FFFFFF" stroke="#5965D0" stroke-width="2.5"/>
+    <circle cx="431" cy="328" r="20" fill="#ECEEFF"/>
+    <path d="M421 328 C421 317 441 317 441 328 C441 339 421 339 421 328 Z" fill="none" stroke="#4E59C3" stroke-width="2.3"/>
+    <circle cx="431" cy="328" r="4" fill="#4E59C3"/>
+    <text x="466" y="320" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#6C75A4">信号不足时，仅调用一次</text>
+    <text x="466" y="346" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#24345D">Structured LLM</text>
+    <text x="418" y="376" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#66758A">意图 + 槽位 + user_act + corrected_slots</text>
+  </g>
+
+  <line x1="642" y1="550" x2="675" y2="550" stroke="#697B90" stroke-width="3"/>
+  <polygon points="687,550 675,543 675,557" fill="#697B90"/>
+
+  <!-- Validation pipeline -->
+  <g transform="translate(0 208)">
+    <path d="M710 284 H990 Q1008 284 1008 302 V382 Q1008 400 990 400 H710 Q692 400 692 382 V302 Q692 284 710 284 Z"
+          fill="#FFF8E8" stroke="#D49A2F" stroke-width="2"/>
+    <text x="716" y="310" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#80591B">结构化输出防线</text>
+    <line x1="716" y1="320" x2="983" y2="320" stroke="#E3C77E" stroke-width="1.5"/>
+    <circle cx="744" cy="354" r="22" fill="#F3C65D"/>
+    <text x="744" y="359" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#5A3A08">01</text>
+    <text x="744" y="388" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#6A5530">JSON 截取</text>
+    <line x1="770" y1="354" x2="798" y2="354" stroke="#B88A30" stroke-width="2"/>
+    <polygon points="808,354 798,348 798,360" fill="#B88A30"/>
+    <circle cx="840" cy="354" r="22" fill="#F3C65D"/>
+    <text x="840" y="359" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#5A3A08">02</text>
+    <text x="840" y="388" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#6A5530">归一化</text>
+    <line x1="866" y1="354" x2="894" y2="354" stroke="#B88A30" stroke-width="2"/>
+    <polygon points="904,354 894,348 894,360" fill="#B88A30"/>
+    <circle cx="936" cy="354" r="22" fill="#F3C65D"/>
+    <text x="936" y="359" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#5A3A08">03</text>
+    <text x="936" y="388" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#6A5530">Pydantic 校验</text>
+  </g>
+
+  <!-- Valid path -->
+  <polyline points="1008,533 1086,533 1086,480 1250,480" fill="none" stroke="#118D81" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="1262,480 1250,473 1250,487" fill="#118D81"/>
+  <rect x="1019" y="515" width="54" height="24" rx="12" fill="#DDF2EC"/>
+  <text x="1046" y="532" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#16766E">通过</text>
+
+  <!-- Failure branch -->
+  <line x1="1008" y1="578" x2="1031" y2="578" stroke="#C84D4D" stroke-width="3"/>
+  <polygon points="1043,578 1031,571 1031,585" fill="#C84D4D"/>
+  <g transform="translate(0 208)">
+    <rect x="1043" y="338" width="178" height="64" rx="20" fill="#FFF0ED" stroke="#D65B52" stroke-width="2"/>
+    <circle cx="1074" cy="370" r="15" fill="#D65B52"/>
+    <path d="M1068 364 L1080 376 M1080 364 L1068 376" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"/>
+    <text x="1098" y="365" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#A53535">异常 fallback</text>
+    <text x="1098" y="385" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#874A47">OTHER / clarify</text>
+  </g>
+  <polyline points="1132,546 1132,525 1250,525" fill="none" stroke="#C84D4D" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="1262,525 1250,518 1250,532" fill="#C84D4D"/>
+
+  <!-- UnderstandingResult contract -->
+  <g transform="translate(0 229)">
+    <path d="M1282 136 H1530 Q1554 136 1554 160 V297 Q1554 321 1530 321 H1282 Q1258 321 1258 297 V160 Q1258 136 1282 136 Z"
+          fill="url(#stateFlow)" stroke="#056D68" stroke-width="2.5"/>
+    <circle cx="1303" cy="176" r="22" fill="#FFFFFF" opacity="0.17"/>
+    <path d="M1293 168 H1313 V184 H1293 Z M1297 173 H1309 M1297 179 H1306" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    <text x="1338" y="170" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#D5FFF6">两路语义汇合</text>
+    <text x="1338" y="196" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">UnderstandingResult</text>
+    <line x1="1285" y1="210" x2="1528" y2="210" stroke="#78CFC3" stroke-width="1.5"/>
+    <text x="1285" y="234" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#E6FFFA">intents · primary_intent · confidence</text>
+    <text x="1285" y="257" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#E6FFFA">extracted_slots · corrected_slots</text>
+    <text x="1285" y="280" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#E6FFFA">user_act · route_to</text>
+    <rect x="1285" y="291" width="123" height="20" rx="10" fill="#FFFFFF" opacity="0.16"/>
+    <text x="1347" y="305" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">Pydantic Model</text>
+  </g>
+
+  <!-- Understanding to reducer -->
+  <polyline points="1406,550 1406,960 1120,960 1120,968" fill="none" stroke="#148C82" stroke-width="3.5" stroke-linejoin="round"/>
+  <polygon points="1120,980 1113,968 1127,968" fill="#148C82"/>
+  <rect x="1262" y="681" width="174" height="25" rx="12.5" fill="#DDF2EC"/>
+  <text x="1349" y="698" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#15766E">强类型输入契约</text>
+
+  <!-- Old DialogueState -->
+  <g transform="translate(0 300)">
+    <path d="M60 515 H322 Q340 515 340 533 V601 Q340 619 322 619 H60 Q42 619 42 601 V533 Q42 515 60 515 Z"
+          fill="#E2F3EE" stroke="#16877B" stroke-width="2"/>
+    <ellipse cx="91" cy="544" rx="22" ry="10" fill="#0E887D"/>
+    <rect x="69" y="544" width="44" height="25" fill="#0E887D"/>
+    <ellipse cx="91" cy="569" rx="22" ry="10" fill="#0A716A"/>
+    <ellipse cx="91" cy="544" rx="17" ry="6" fill="#AEE5DB"/>
+    <text x="130" y="548" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#39716C">持久化快照</text>
+    <text x="130" y="575" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#164843">旧 DialogueState</text>
+    <text x="66" y="602" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#4D6D69">active_intent · slots · pending_action · version</text>
+  </g>
+
+  <!-- Old state connector -->
+  <polyline points="191,919 191,952 520,952 520,968" fill="none" stroke="#16877B" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="520,980 513,968 527,968" fill="#16877B"/>
+
+  <!-- Tool observations -->
+  <g transform="translate(348 141)">
+    <path d="M60 674 H322 Q340 674 340 692 V752 Q340 770 322 770 H60 Q42 770 42 752 V692 Q42 674 60 674 Z"
+          fill="#EAF5F1" stroke="#4A9D92" stroke-width="2"/>
+    <circle cx="91" cy="712" r="21" fill="#169285"/>
+    <path d="M80 712 L87 719 L103 703" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="130" y="706" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#4C7772">工具执行事实</text>
+    <text x="130" y="733" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#164843">Tool Observations</text>
+    <text x="66" y="756" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#4D6D69">success + data，仅作为补全来源</text>
+  </g>
+
+  <!-- Observation connector -->
+  <polyline points="539,911 539,940 700,940 700,968" fill="none" stroke="#4A9D92" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="700,980 693,968 707,968" fill="#4A9D92"/>
+
+  <!-- DST Reducer focal node -->
+  <g transform="translate(0 480)">
+    <path d="M458 500 H1123 Q1151 500 1151 528 V754 Q1151 782 1123 782 H458 Q430 782 430 754 V528 Q430 500 458 500 Z"
+          fill="url(#reducerFlow)" stroke="#0B203C" stroke-width="2.5"/>
+    <circle cx="482" cy="548" r="24" fill="#5667D8"/>
+    <path d="M470 548 H494 M482 536 V560 M474 540 L490 556 M490 540 L474 556"
+          stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round"/>
+    <text x="522" y="542" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#BFCBF2">DETERMINISTIC REDUCER</text>
+    <text x="522" y="571" font-family="Noto Sans SC, sans-serif" font-size="23" font-weight="700" fill="#FFFFFF">Dialogue State Tracker</text>
+    <rect x="940" y="526" width="171" height="38" rx="19" fill="#314D7B"/>
+    <text x="1026" y="551" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#DDE8FF">纯函数 · version + 1</text>
+    <line x1="464" y1="589" x2="1117" y2="589" stroke="#496186" stroke-width="1.5"/>
+
+    <!-- Rule 1 -->
+    <circle cx="485" cy="620" r="15" fill="#F3C65D"/>
+    <text x="485" y="625" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#563907">1</text>
+    <text x="512" y="625" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFF4CF">corrected_slots</text>
+    <text x="633" y="625" font-family="Noto Sans SC, sans-serif" font-size="13" fill="#E8EEF8">显式声明时，允许覆盖旧槽位值</text>
+
+    <!-- Rule 2 -->
+    <circle cx="485" cy="655" r="15" fill="#F3C65D"/>
+    <text x="485" y="660" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#563907">2</text>
+    <text x="512" y="660" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFF4CF">普通新值</text>
+    <text x="588" y="660" font-family="Noto Sans SC, sans-serif" font-size="13" fill="#E8EEF8">不静默覆盖已存在的用户值</text>
+
+    <!-- Rule 3 -->
+    <circle cx="485" cy="690" r="15" fill="#F3C65D"/>
+    <text x="485" y="695" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#563907">3</text>
+    <text x="512" y="695" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFF4CF">SWITCH</text>
+    <text x="571" y="695" font-family="Noto Sans SC, sans-serif" font-size="13" fill="#E8EEF8">清空 pending_action，仅复用 order_id / tracking_no</text>
+
+    <!-- Rule 4 -->
+    <circle cx="485" cy="725" r="15" fill="#F3C65D"/>
+    <text x="485" y="730" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#563907">4</text>
+    <text x="512" y="730" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFF4CF">Observation</text>
+    <text x="601" y="730" font-family="Noto Sans SC, sans-serif" font-size="13" fill="#E8EEF8">只补缺失值，永不覆盖用户提供值</text>
+
+    <!-- Schema calculation strip -->
+    <rect x="464" y="747" width="653" height="25" rx="12.5" fill="#0B213E"/>
+    <text x="791" y="764" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#C7D6EC">合并全部槽位来源后，再计算 required / missing / agent</text>
+  </g>
+
+  <!-- IntentSchema -->
+  <g transform="translate(-387 315)">
+    <path d="M1197 500 H1518 Q1538 500 1538 520 V617 Q1538 637 1518 637 H1197 Q1177 637 1177 617 V520 Q1177 500 1197 500 Z"
+          fill="#FFF4D8" stroke="#CF9027" stroke-width="2.5"/>
+    <polygon points="1218,521 1238,533 1238,557 1218,569 1198,557 1198,533" fill="#E3A637"/>
+    <path d="M1209 545 H1227 M1218 536 V554" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"/>
+    <text x="1255" y="536" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#855A17">意图静态契约</text>
+    <text x="1255" y="563" font-family="Noto Sans SC, sans-serif" font-size="20" font-weight="700" fill="#563C12">IntentSchema</text>
+    <line x1="1200" y1="579" x2="1513" y2="579" stroke="#DFC17B" stroke-width="1.5"/>
+    <text x="1200" y="602" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#684A18">required_slots</text>
+    <text x="1315" y="602" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#684A18">missing_slots</text>
+    <text x="1423" y="602" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#684A18">allowed_agents</text>
+    <text x="1200" y="622" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#826328">按 active_intent 查表，并派生状态与路由约束</text>
+  </g>
+
+  <!-- IntentSchema to reducer -->
+  <line x1="970" y1="952" x2="970" y2="968" stroke="#C78A26" stroke-width="3"/>
+  <polygon points="970,980 963,968 977,968" fill="#C78A26"/>
+
+  <!-- New DialogueState -->
+  <g transform="translate(-201 632)">
+    <path d="M1201 668 H1400 Q1420 668 1420 688 V772 Q1420 792 1400 792 H1201 Q1181 792 1181 772 V688 Q1181 668 1201 668 Z"
+          fill="#DDF2EC" stroke="#148C82" stroke-width="2.5"/>
+    <circle cx="1219" cy="707" r="20" fill="#148C82"/>
+    <path d="M1209 707 L1216 714 L1229 700" fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1253" y="700" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#39716C">不可变新快照</text>
+    <text x="1253" y="727" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#164843">新 DialogueState</text>
+    <line x1="1205" y1="742" x2="1395" y2="742" stroke="#A8D6CD" stroke-width="1.5"/>
+    <text x="1205" y="761" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#4D6D69">slots · missing · pending · confirmation</text>
+    <text x="1205" y="778" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#4D6D69">last_agent · state_version + 1</text>
+  </g>
+
+  <!-- Reducer output -->
+  <polyline points="1100,1262 1100,1288 1100,1288" fill="none" stroke="#148C82" stroke-width="3.5"/>
+  <polygon points="1100,1300 1093,1288 1107,1288" fill="#148C82"/>
+
+  <!-- TurnEngine -->
+  <g transform="translate(-194 624)">
+    <path d="M1460 676 H1552 Q1568 676 1568 692 V768 Q1568 784 1552 784 H1460 Q1444 784 1444 768 V692 Q1444 676 1460 676 Z"
+          fill="#4E5CCE" stroke="#343EA4" stroke-width="2.5"/>
+    <circle cx="1506" cy="711" r="18" fill="#FFFFFF" opacity="0.18"/>
+    <path d="M1506 700 V711 L1514 716 M1497 703 Q1506 695 1515 703"
+          fill="none" stroke="#FFFFFF" stroke-width="2.1" stroke-linecap="round"/>
+    <text x="1506" y="747" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">TurnEngine</text>
+    <text x="1506" y="766" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#E1E5FF">下一状态决策</text>
+  </g>
+  <line x1="1219" y1="1354" x2="1238" y2="1354" stroke="#4E5CCE" stroke-width="3.5"/>
+  <polygon points="1250,1354 1238,1347 1238,1361" fill="#4E5CCE"/>
+
+  <!-- Core conclusion -->
+  <g transform="translate(0 610)">
+    <path d="M872 820 H1540 Q1558 820 1558 838 V862 Q1558 880 1540 880 H872 Q854 880 854 862 V838 Q854 820 872 820 Z"
+          fill="#102B4C"/>
+    <circle cx="887" cy="850" r="12" fill="#35C2A7"/>
+    <path d="M881 850 L886 855 L894 845" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="913" y="856" font-family="Noto Sans SC, sans-serif" font-size="17" font-weight="700" fill="#FFFFFF">核心结论：自然语言先变成强类型契约，再驱动状态机。</text>
+  </g>
+
+  <!-- Footer annotations -->
+  <text x="42" y="1452" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#6E7A82">DATA PRECEDENCE</text>
+  <text x="42" y="1473" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#52636B">显式纠正 ＞ 已有用户值 ＞ 新普通值 ＞ Tool Observation</text>
+</svg>
