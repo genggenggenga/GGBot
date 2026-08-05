@@ -1,4 +1,4 @@
-# GGBot / EchoMind
+# GGBot
 
 GGBot 是一个用于展示智能客服、Agent 编排与 Hybrid RAG 的技术原型。项目以退款申请为主链路，覆盖结构化 NLU、Dialogue State Tracking、自研 Turn-level 状态机、领域 Agent、标准 MCP、工具确认门禁、引用式 RAG、记忆和离线评测。
 

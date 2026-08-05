@@ -1,8 +1,10 @@
-# EchoMind 依赖清单
+# GGBot 依赖清单
 
 # ── AI / LLM ──────────────────────────────────────────────────────────────────
 anthropic==0.40.0          # LLM 调用；意图 Embedding 分支支持远端客户端，缺失时本地兜底
-sentence-transformers==3.3.1  # BGE Embedding 与 Cross-Encoder Reranker
+# Embedding / Reranker：默认走 SiliconFlow API（无需本地 torch）。
+# 如需本地 BGE 模型，取消下行注释（会拉入 torch ~200MB CPU 版）：
+# sentence-transformers==3.3.1
 
 # ── Web 框架 ──────────────────────────────────────────────────────────────────
 fastapi==0.115.5

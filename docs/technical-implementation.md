@@ -1,12 +1,12 @@
-# GGBot / EchoMind 当前版本技术实现
+# GGBot 当前版本技术实现
 
 > Turn-level Agent Runtime · Standard MCP · Hybrid RAG · Persistent Memory
 >
 > 本地版本与[飞书文档](https://bytedance.sg.larkoffice.com/docx/Ix4bdrw7Moqennx7kINloQdbgMc) revision 31 对齐。
 
-| 项目 | 内容 | 项目 | 内容 |
-|---|---|---|---|
-| 当前版本 | `feat-v1 / f901c50` | 核心场景 | 退款申请三轮闭环 |
+| 项目     | 内容                      | 项目     | 内容                              |
+| -------- | ------------------------- | -------- | --------------------------------- |
+| 当前版本 | `feat-v1 / f901c50`       | 核心场景 | 退款申请三轮闭环                  |
 | 验证结果 | 238 tests passed · 12.64s | 技术主线 | 显式状态机 + 多 Agent + MCP + RAG |
 
 > **项目定位**
@@ -15,15 +15,15 @@
 
 ## 1. 一页看懂当前版本
 
-| 能力 | 当前实现 | 状态 |
-|---|---|---|
-| 对话编排 | 自研 TurnEngine，显式状态迁移、暂停与跨轮恢复 | 主链路已落地 |
-| 对话理解 | 规则 fast-track + 单次结构化 LLM + 安全降级 | 主链路已落地 |
-| Multi-Agent | Knowledge、Order、Logistics、AfterSales 四类领域 Agent | 确定性路由 |
-| 工具协议 | 官方 MCP SDK、stdio Server、动态工具发现 | 可运行 Demo |
-| 知识检索 | Chroma Dense + BM25 + RRF + Cross-Encoder | 效果待继续验证 |
-| 记忆系统 | Redis 工作记忆与状态，Chroma 情景记忆与画像 | 分层存储 |
-| 质量体系 | Trace、Prometheus、238 个测试、50 条离线评测 | 监控仍有双链路 |
+| 能力        | 当前实现                                               | 状态           |
+| ----------- | ------------------------------------------------------ | -------------- |
+| 对话编排    | 自研 TurnEngine，显式状态迁移、暂停与跨轮恢复          | 主链路已落地   |
+| 对话理解    | 规则 fast-track + 单次结构化 LLM + 安全降级            | 主链路已落地   |
+| Multi-Agent | Knowledge、Order、Logistics、AfterSales 四类领域 Agent | 确定性路由     |
+| 工具协议    | 官方 MCP SDK、stdio Server、动态工具发现               | 可运行 Demo    |
+| 知识检索    | Chroma Dense + BM25 + RRF + Cross-Encoder              | 效果待继续验证 |
+| 记忆系统    | Redis 工作记忆与状态，Chroma 情景记忆与画像            | 分层存储       |
+| 质量体系    | Trace、Prometheus、238 个测试、50 条离线评测           | 监控仍有双链路 |
 
 ### 系统架构
 
@@ -41,14 +41,14 @@
 
 **业务状态与执行状态分离。** DialogueState 保存 active_intent、slots、missing_slots、pending_action 和 confirmation_status，描述“业务进行到哪里”；TurnContext 保存 execution_state、state_history、observations、step_count 和 response，描述“本轮执行到哪一步”。这种拆分使业务状态可以跨轮持久化，而本轮执行轨迹可以独立限制和观测。
 
-| 模块 | 核心对象 | 职责边界 |
-|---|---|---|
-| 接入层 | `FastAPI /chat` | 请求校验、上下文装配、结果序列化与生命周期管理 |
-| 理解层 | `IntentRecognizer`<br>`DialogueStateTracker` | 把自然语言变成结构化理解，并归并为可持久化业务状态 |
-| 编排层 | `CustomerAgentRuntime`<br>`TurnEngine` | 注册状态 handler、执行有界状态循环、处理暂停与失败 |
-| 领域层 | `Router`<br>`DomainAgentRuntime` | 确定性路由，执行一个或多个领域子任务并合并结果 |
-| 能力层 | `ToolRegistry`<br>`MCPToolAdapter` | 工具发现、白名单、参数校验、确认门禁和统一结果模型 |
-| 数据层 | Redis / ChromaDB | 保存 DialogueState、工作记忆、情景记忆、画像和知识索引 |
+| 模块   | 核心对象                                     | 职责边界                                               |
+| ------ | -------------------------------------------- | ------------------------------------------------------ |
+| 接入层 | `FastAPI /chat`                              | 请求校验、上下文装配、结果序列化与生命周期管理         |
+| 理解层 | `IntentRecognizer`<br>`DialogueStateTracker` | 把自然语言变成结构化理解，并归并为可持久化业务状态     |
+| 编排层 | `CustomerAgentRuntime`<br>`TurnEngine`       | 注册状态 handler、执行有界状态循环、处理暂停与失败     |
+| 领域层 | `Router`<br>`DomainAgentRuntime`             | 确定性路由，执行一个或多个领域子任务并合并结果         |
+| 能力层 | `ToolRegistry`<br>`MCPToolAdapter`           | 工具发现、白名单、参数校验、确认门禁和统一结果模型     |
+| 数据层 | Redis / ChromaDB                             | 保存 DialogueState、工作记忆、情景记忆、画像和知识索引 |
 
 ## 2. 一次请求如何执行
 
@@ -82,21 +82,21 @@ while state not in terminal_states:
     await state_store.save(context.dialogue_state)
 ```
 
-| 状态 | 主要处理 | 可能去向 |
-|---|---|---|
-| `UNDERSTANDING` | 检查必填槽位 | 缺槽进入 CLARIFYING，否则进入 ROUTING |
-| `ROUTING` | 根据 DialogueState 选择 Agent | Knowledge 进入 RETRIEVING，业务 Agent 进入 ACTING |
-| `RETRIEVING / ACTING` | 执行领域 Agent 与工具 | 完成后 RESPONDING；写操作待确认时暂停 |
-| `AWAITING_CONFIRMATION` | 等待下一轮确认或拒绝 | 确认后 ACTING；拒绝后 RESPONDING |
-| `FAILED` | 生成 HandoffPackage | 终止自动执行，保留意图、槽位和 Observation |
+| 状态                    | 主要处理                      | 可能去向                                          |
+| ----------------------- | ----------------------------- | ------------------------------------------------- |
+| `UNDERSTANDING`         | 检查必填槽位                  | 缺槽进入 CLARIFYING，否则进入 ROUTING             |
+| `ROUTING`               | 根据 DialogueState 选择 Agent | Knowledge 进入 RETRIEVING，业务 Agent 进入 ACTING |
+| `RETRIEVING / ACTING`   | 执行领域 Agent 与工具         | 完成后 RESPONDING；写操作待确认时暂停             |
+| `AWAITING_CONFIRMATION` | 等待下一轮确认或拒绝          | 确认后 ACTING；拒绝后 RESPONDING                  |
+| `FAILED`                | 生成 HandoffPackage           | 终止自动执行，保留意图、槽位和 Observation        |
 
 ## 3. 退款申请：最小完整业务闭环
 
-| 用户输入 | 状态 | 系统行为 |
-|---|---|---|
-| “我要退款” | `CLARIFYING` | 识别 `refund_request`，发现缺少 `order_id`，追问订单号 |
-| “订单号 ORD-1001” | `AWAITING_CONFIRMATION` | 继承退款意图，查询订单并核验资格，生成包含 action_id 的 PendingAction |
-| “确认” | `COMPLETED` | 恢复 PendingAction，通过确认门禁调用 `create_refund`，返回退款申请编号 |
+| 用户输入          | 状态                    | 系统行为                                                               |
+| ----------------- | ----------------------- | ---------------------------------------------------------------------- |
+| “我要退款”        | `CLARIFYING`            | 识别 `refund_request`，发现缺少 `order_id`，追问订单号                 |
+| “订单号 ORD-1001” | `AWAITING_CONFIRMATION` | 继承退款意图，查询订单并核验资格，生成包含 action_id 的 PendingAction  |
+| “确认”            | `COMPLETED`             | 恢复 PendingAction，通过确认门禁调用 `create_refund`，返回退款申请编号 |
 
 ### 写操作确认、恢复与幂等
 
@@ -122,12 +122,12 @@ while state not in terminal_states:
 
 ![NLU 与 Dialogue State Tracking](../diagrams/2026-08-05T020101/diagram.png)
 
-| 机制 | 实现方式 |
-|---|---|
-| 确定性 fast-track | 正则提取订单号、物流号；关键词识别退款、退货、取消订单、物流和订单意图 |
-| 用户行为识别 | 识别 confirm、reject、switch、inform，并在意图关键词存在时避免误判确认 |
-| 结构化 LLM | fast-track 不足时仅调用一次 LLM，要求返回固定 JSON；解析失败后降级 |
-| 槽位治理 | 支持跨轮继承、显式纠正、静默覆盖抑制，以及跨意图复用 order_id / tracking_no |
+| 机制              | 实现方式                                                                    |
+| ----------------- | --------------------------------------------------------------------------- |
+| 确定性 fast-track | 正则提取订单号、物流号；关键词识别退款、退货、取消订单、物流和订单意图      |
+| 用户行为识别      | 识别 confirm、reject、switch、inform，并在意图关键词存在时避免误判确认      |
+| 结构化 LLM        | fast-track 不足时仅调用一次 LLM，要求返回固定 JSON；解析失败后降级          |
+| 槽位治理          | 支持跨轮继承、显式纠正、静默覆盖抑制，以及跨意图复用 order_id / tracking_no |
 
 **理解结果使用强类型契约。** `UnderstandingResult` 包含 intents、primary_intent、confidence、extracted_slots、corrected_slots、user_act 和 route_to。Pydantic 校验 primary_intent 必须出现在 intents 中，置信度必须位于 0 到 1，非法字段被禁止，从数据入口阻止模型输出污染状态机。
 
@@ -145,11 +145,11 @@ while state not in terminal_states:
 
 ![Multi-Agent 与有界执行](../diagrams/2026-08-05T020102/diagram.png)
 
-| Agent | 职责 | 核心工具 |
-|---|---|---|
-| KnowledgeAgent | 政策与 FAQ | `rag_search`，固定一次检索 |
-| OrderAgent | 订单事实 | `query_order` |
-| LogisticsAgent | 订单与物流轨迹 | `query_order → track_package` |
+| Agent           | 职责                 | 核心工具                                                 |
+| --------------- | -------------------- | -------------------------------------------------------- |
+| KnowledgeAgent  | 政策与 FAQ           | `rag_search`，固定一次检索                               |
+| OrderAgent      | 订单事实             | `query_order`                                            |
+| LogisticsAgent  | 订单与物流轨迹       | `query_order → track_package`                            |
 | AfterSalesAgent | 退款资格与售后写操作 | `query_order → check_refund_eligibility → create_refund` |
 
 Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默认最多 4 步。KnowledgeAgent 不进入 ReAct 循环，避免 FAQ 场景产生无界工具规划。
@@ -170,13 +170,13 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 应用通过官方 `mcp` Python SDK 以 stdio 启动 `mcp_server.customer_service_server`，完成 initialize、list_tools 和动态注册。MCPToolAdapter 将服务端定义转换为统一 ToolSpec / ToolResult。
 
-| 执行约束 | 行为 |
-|---|---|
-| Agent 白名单 | 每个 Agent 只能调用明确授权的工具 |
-| 读写分类 | `create_refund` 和 `create_ticket` 被标记为 WRITE |
-| 确认门禁 | WRITE 工具必须携带已确认的 action_id，否则直接拒绝执行 |
-| 幂等保护 | MCP Server 按 action_id 缓存写入结果，重放不会重复创建 |
-| 韧性策略 | 本地 Adapter 支持参数校验、超时、TTL 缓存、熔断和 fallback |
+| 执行约束     | 行为                                                       |
+| ------------ | ---------------------------------------------------------- |
+| Agent 白名单 | 每个 Agent 只能调用明确授权的工具                          |
+| 读写分类     | `create_refund` 和 `create_ticket` 被标记为 WRITE          |
+| 确认门禁     | WRITE 工具必须携带已确认的 action_id，否则直接拒绝执行     |
+| 幂等保护     | MCP Server 按 action_id 缓存写入结果，重放不会重复创建     |
+| 韧性策略     | 本地 Adapter 支持参数校验、超时、TTL 缓存、熔断和 fallback |
 
 **工具契约由 ToolSpec 描述。** 每个工具包含 name、description、input_schema、output_schema、tool_type、timeout_s、cache_ttl 和 supports_rerank。调用前使用轻量 JSON Schema 规则检查 required、基础类型和 enum；失败时返回结构化 ToolResult，而不是直接抛出到 Agent。
 
@@ -198,13 +198,13 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 `Loader → Structure-aware Chunking → Dense + BM25 → RRF → Cross-Encoder → Citation`
 
-| 阶段 | 实现 |
-|---|---|
-| 文档解析 | 支持 TXT、Markdown、PDF 和 JSON；保留 Markdown 标题路径与 PDF 页码 |
-| 切片 | 默认 chunk_size=500、overlap=80，使用内容哈希生成 chunk_id 与 parent_id |
-| 双路召回 | ChromaDB + BGE Dense，与进程内 BM25 并行检索 |
-| 融合与重排 | RRF 默认 k=60，可选 `BAAI/bge-reranker-v2-m3` |
-| 引用与拒答 | 返回 source、title、section、page、chunk_id；无相关证据时拒绝回答 |
+| 阶段       | 实现                                                                    |
+| ---------- | ----------------------------------------------------------------------- |
+| 文档解析   | 支持 TXT、Markdown、PDF 和 JSON；保留 Markdown 标题路径与 PDF 页码      |
+| 切片       | 默认 chunk_size=500、overlap=80，使用内容哈希生成 chunk_id 与 parent_id |
+| 双路召回   | ChromaDB + BGE Dense，与进程内 BM25 并行检索                            |
+| 融合与重排 | RRF 默认 k=60，可选 `BAAI/bge-reranker-v2-m3`                           |
+| 引用与拒答 | 返回 source、title、section、page、chunk_id；无相关证据时拒绝回答       |
 
 **导入阶段保持结构信息。** `load_document()` 按文件类型分发：TXT 作为单节；Markdown 按标题层级构造 section path；PDF 逐页提取并记录 page。`chunk_sections()` 使用段落、换行、中文标点和空格递归切分，最后应用 overlap，避免简单定长截断破坏全部语义边界。
 
@@ -226,12 +226,12 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 ![记忆与持久化](../diagrams/2026-08-05T020105/diagram.png)
 
-| 数据 | 存储 | 策略 |
-|---|---|---|
-| DialogueState | Redis | 每个状态机步骤保存，TTL 24 小时 |
-| 工作记忆 | Redis List | 15 条触发覆盖式摘要，保留最近 5 条 |
-| 情景记忆 | ChromaDB | 仅任务完成或转人工时写入，支持跨会话检索 |
-| 用户画像 | ChromaDB | 稳定偏好信号门控；过滤订单号、物流号等时效事实 |
+| 数据          | 存储       | 策略                                           |
+| ------------- | ---------- | ---------------------------------------------- |
+| DialogueState | Redis      | 每个状态机步骤保存，TTL 24 小时                |
+| 工作记忆      | Redis List | 15 条触发覆盖式摘要，保留最近 5 条             |
+| 情景记忆      | ChromaDB   | 仅任务完成或转人工时写入，支持跨会话检索       |
+| 用户画像      | ChromaDB   | 稳定偏好信号门控；过滤订单号、物流号等时效事实 |
 
 **DialogueState 与自然语言记忆分开保存。** RedisStateStore 使用 `dst:{user_id}:{conv_id}` 作为键，保存 Pydantic JSON，默认 TTL 24 小时。TurnEngine 只读写这个结构化状态；MemoryManager 负责消息、摘要、情景记忆和画像，两者共享 Redis 连接但不共享 key，避免摘要文本成为业务状态真源。
 
@@ -245,9 +245,9 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 ## 5. 可观测性与质量验证
 
-| Agent Trace | 在线监控 |
-|---|---|
-| 记录理解摘要、Agent 结果、工具名、状态路径和延迟 | 采集 Agent / Tool 成功率和延迟，使用滑动窗口 Z-score 检测异常 |
+| Agent Trace                                                                   | 在线监控                                                          |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| 记录理解摘要、Agent 结果、工具名、状态路径和延迟                              | 采集 Agent / Tool 成功率和延迟，使用滑动窗口 Z-score 检测异常     |
 | 主动移除用户原文、完整 Prompt、查询内容和隐藏推理，仅保留截断后的公开观察摘要 | 支持 Prometheus、Webhook 和路由降权；新 ToolRegistry 尚未完整接入 |
 
 ### Trace 与在线监控实现
@@ -264,15 +264,15 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 ### 本地确定性评测
 
-| 指标 | 结果 | 判断 |
-|---|---|---|
-| Intent Accuracy / Macro-F1 | 1.000 / 1.000 | 固定样本全部命中 |
-| Slot F1 / DST JGA | 1.000 / 1.000 | 状态样本全部命中 |
-| Recall@5 / MRR | 0.900 / 0.850 | Dense 与 Hybrid 相同 |
-| Hybrid + Reranker MRR | 0.525 | 当前测试排序下降 |
-| Tool Selection / Parameter | 0.900 / 0.400 | 参数构造是短板 |
-| Task Completion Rate | 0.600 | 10 条 E2E 中完成 6 条 |
-| Citation / Faithfulness | 0.000 / 0.000 | 证据评测闭环未完成 |
+| 指标                       | 结果          | 判断                  |
+| -------------------------- | ------------- | --------------------- |
+| Intent Accuracy / Macro-F1 | 1.000 / 1.000 | 固定样本全部命中      |
+| Slot F1 / DST JGA          | 1.000 / 1.000 | 状态样本全部命中      |
+| Recall@5 / MRR             | 0.900 / 0.850 | Dense 与 Hybrid 相同  |
+| Hybrid + Reranker MRR      | 0.525         | 当前测试排序下降      |
+| Tool Selection / Parameter | 0.900 / 0.400 | 参数构造是短板        |
+| Task Completion Rate       | 0.600         | 10 条 E2E 中完成 6 条 |
+| Citation / Faithfulness    | 0.000 / 0.000 | 证据评测闭环未完成    |
 
 > **评测口径限制**
 >
@@ -290,12 +290,12 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 ## 6. API 与部署形态
 
-| 领域 | 接口 | 用途 |
-|---|---|---|
-| 对话 | `POST /chat`<br>`GET /traces/{trace_id}` | 执行主链路并查询公开 Trace |
-| 知识 | `POST /knowledge/add`<br>`POST /knowledge/upload` | 导入文本、Markdown、PDF 或 JSON |
-| 运营 | `GET /skills`<br>`POST /skills/reload` | 查看和热加载业务 Skill |
-| 质量 | `POST /eval/run`<br>`GET /monitor`<br>`GET /metrics` | 评测、监控与 Prometheus 指标 |
+| 领域 | 接口                                                 | 用途                            |
+| ---- | ---------------------------------------------------- | ------------------------------- |
+| 对话 | `POST /chat`<br>`GET /traces/{trace_id}`             | 执行主链路并查询公开 Trace      |
+| 知识 | `POST /knowledge/add`<br>`POST /knowledge/upload`    | 导入文本、Markdown、PDF 或 JSON |
+| 运营 | `GET /skills`<br>`POST /skills/reload`               | 查看和热加载业务 Skill          |
+| 质量 | `POST /eval/run`<br>`GET /monitor`<br>`GET /metrics` | 评测、监控与 Prometheus 指标    |
 
 **部署栈。** Python 3.12 + FastAPI/Uvicorn + Redis 7 + ChromaDB 0.5.23 + Prometheus + Nginx。Dockerfile 使用多阶段构建和非 root 用户；Docker Compose 配置健康检查、持久卷和服务依赖。
 
@@ -307,16 +307,16 @@ Redis 同时服务 DialogueState 与工作记忆，但使用不同 key 空间；
 
 MCPClient 使用当前 Python 解释器拉起 `python -m mcp_server.customer_service_server`，并通过 PYTHONPATH 指向项目根目录。应用退出时按 best-effort 顺序停止 Monitor、关闭 MCP session 和 MemoryManager，即使单个资源清理失败也继续释放其余资源。
 
-| 关键配置 | 作用 |
-|---|---|
+| 关键配置                     | 作用                                                     |
+| ---------------------------- | -------------------------------------------------------- |
 | `ANTHROPIC_MODEL / BASE_URL` | 选择结构化 NLU、摘要和 legacy Agent 使用的模型与兼容端点 |
-| `REDIS_URL` | DialogueState、工作记忆和会话摘要连接地址 |
-| `CHROMA_HOST / CHROMA_PORT` | 知识库、情景记忆和用户画像的 ChromaDB 服务地址 |
-| `RAG_LOCAL_MODELS_ENABLED` | 控制是否启用本地 BGE Embedding 与 Cross-Encoder |
-| `RAG_RELEVANCE_THRESHOLD` | 控制无相关证据时的拒答阈值 |
-| `ECHOMIND_SKILLS_DIR` | 业务 Skill 的扫描目录，支持运行时 reload |
+| `REDIS_URL`                  | DialogueState、工作记忆和会话摘要连接地址                |
+| `CHROMA_HOST / CHROMA_PORT`  | 知识库、情景记忆和用户画像的 ChromaDB 服务地址           |
+| `RAG_LOCAL_MODELS_ENABLED`   | 控制是否启用本地 BGE Embedding 与 Cross-Encoder          |
+| `RAG_RELEVANCE_THRESHOLD`    | 控制无相关证据时的拒答阈值                               |
+| `GGBOT_SKILLS_DIR`        | 业务 Skill 的扫描目录，支持运行时 reload                 |
 
-Docker Compose 将 Redis、ChromaDB、Prometheus、EchoMind 和 Nginx 放在同一网络内，通过服务健康检查控制启动依赖。Redis 开启 AOF，Chroma 和 Prometheus 使用持久卷；应用容器以非 root 用户运行，并把知识数据、评测报告、Skills 和日志映射到宿主机目录。
+Docker Compose 将 Redis、ChromaDB、Prometheus、GGBot 和 Nginx 放在同一网络内，通过服务健康检查控制启动依赖。Redis 开启 AOF，Chroma 和 Prometheus 使用持久卷；应用容器以非 root 用户运行，并把知识数据、评测报告、Skills 和日志映射到宿主机目录。
 
 ```bash
 uv venv --python 3.12
@@ -330,14 +330,14 @@ export ANTHROPIC_API_KEY=your_key
 
 ## 7. 当前限制与演进优先级
 
-| 优先级 | 方向 | 目标 |
-|---|---|---|
-| **P0** | 引用忠实度闭环 | 补充真实知识证据、引用支持标注和 grounded 判定 |
-| **P0** | 工具参数准确率 | 覆盖缺参、纠正、跨轮继承和 action_id 构造 |
-| **P1** | 收敛双运行时 | 把旧监控、查询改写和评测迁移到 CustomerAgentRuntime / ToolRegistry |
-| **P1** | 验证 Hybrid 收益 | 使用更有区分度的数据集和真实模型重新做消融 |
-| **P2** | Skills 主链路消费 | 明确 Skill 对动作选择和响应生成的作用位置与评测口径 |
-| **P2** | 生产工程化 | 补齐鉴权、审计、限流、持久 Trace、真实订单系统和压测 |
+| 优先级 | 方向              | 目标                                                               |
+| ------ | ----------------- | ------------------------------------------------------------------ |
+| **P0** | 引用忠实度闭环    | 补充真实知识证据、引用支持标注和 grounded 判定                     |
+| **P0** | 工具参数准确率    | 覆盖缺参、纠正、跨轮继承和 action_id 构造                          |
+| **P1** | 收敛双运行时      | 把旧监控、查询改写和评测迁移到 CustomerAgentRuntime / ToolRegistry |
+| **P1** | 验证 Hybrid 收益  | 使用更有区分度的数据集和真实模型重新做消融                         |
+| **P2** | Skills 主链路消费 | 明确 Skill 对动作选择和响应生成的作用位置与评测口径                |
+| **P2** | 生产工程化        | 补齐鉴权、审计、限流、持久 Trace、真实订单系统和压测               |
 
 ---
 

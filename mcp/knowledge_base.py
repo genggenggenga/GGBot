@@ -10,23 +10,43 @@ ChromaDB 在这里的角色：
   - memory/ 中用于存储对话记忆（情景记忆 + 用户画像）
   - 这里用于存储知识库文档（RAG 检索）
   两者是不同的 collection，互不干扰。
+
+Embedding 策略（由 RAG_EMBEDDING_PROVIDER 控制）：
+  - api:   SiliconFlow 远端 embedding（默认，无需本地 torch）
+  - local: 本地 BGE 模型（需 sentence-transformers/torch）
+  - off:   ChromaDB 默认 ONNX 模型（all-MiniLM-L6-v2，会下载 79MB）
 """
 import hashlib
 import logging
-from typing import Any, Dict, List, Optional
+import os
+from typing import Any, Dict, List
 
 import chromadb
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_embedding_function():
+    """根据 RAG_EMBEDDING_PROVIDER 返回 embedding function 或 None。
+
+    返回 None 时回退到 ChromaDB 默认 ONNX 模型（仅 provider=off）。
+    """
+    provider = os.getenv("RAG_EMBEDDING_PROVIDER", "api").strip().lower()
+    model = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
+    if provider in {"api", "siliconflow"}:
+        from rag.indexes import build_siliconflow_embedding_function
+        return build_siliconflow_embedding_function(model)
+    if provider in {"local", "bge"}:
+        from rag.indexes import build_bge_embedding_function
+        return build_bge_embedding_function(model)
+    return None  # off / 默认 → ChromaDB ONNX
+
+
 class KnowledgeBase:
     """
     基于 ChromaDB 的 RAG 知识库。
 
-    ChromaDB 内置了 Embedding 模型（all-MiniLM-L6-v2），
-    调用 add() 时自动生成向量，query() 时自动做语义匹配。
-    不需要额外调用 Anthropic Embeddings API。
+    Embedding 由 RAG_EMBEDDING_PROVIDER 控制（默认 SiliconFlow API）。
     """
 
     COLLECTION_NAME = "knowledge_base"
@@ -56,11 +76,11 @@ class KnowledgeBase:
                 settings=chromadb.Settings(anonymized_telemetry=False),
             )
 
-        # 使用服务端时不传 embedding_function，让服务端处理
-        # 本地模式时也不传，使用 ChromaDB 默认的（会触发模型下载）
+        embedding_function = _resolve_embedding_function()
         self._collection = self._client.get_or_create_collection(
             name=self.COLLECTION_NAME,
-            metadata={"description": "EchoMind RAG 知识库"},
+            metadata={"description": "GGBot RAG 知识库"},
+            embedding_function=embedding_function,
         )
 
         # 如果知识库为空，导入默认文档

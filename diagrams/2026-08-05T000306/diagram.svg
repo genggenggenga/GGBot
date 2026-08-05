@@ -43,7 +43,7 @@
     <circle cx="104" cy="70" r="23" fill="#6758E8"/>
     <circle cx="104" cy="70" r="10" fill="#FFFFFF"/>
     <path d="M97 70 L103 76 L114 63" fill="none" stroke="#6758E8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="145" y="66" font-family="Noto Sans SC, sans-serif" font-size="31" font-weight="700" fill="#172640">GGBot / EchoMind</text>
+    <text x="145" y="66" font-family="Noto Sans SC, sans-serif" font-size="31" font-weight="700" fill="#172640">GGBot</text>
     <text x="145" y="94" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="500" fill="#66758C">可控编排 · 混合检索 · 标准化工具执行</text>
     <rect x="1435" y="48" width="270" height="42" rx="21" fill="#FFFFFF" stroke="#D9E2F0" stroke-width="1.5"/>
     <circle cx="1465" cy="69" r="7" fill="#2DBE8C"/>

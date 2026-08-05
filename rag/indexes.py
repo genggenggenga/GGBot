@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import Counter
 from typing import Any, Dict, List, Optional, Protocol, Sequence
+
+import httpx
 
 from rag.models import DocumentChunk, SearchHit
 
@@ -75,6 +78,81 @@ def build_bge_embedding_function(
     from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
     return SentenceTransformerEmbeddingFunction(model_name=model_name)
+
+
+class SiliconFlowEmbeddingFunction:
+    """ChromaDB-compatible embedding function backed by SiliconFlow API.
+
+    Drop-in replacement for ``SentenceTransformerEmbeddingFunction`` that
+    delegates inference to the SiliconFlow ``/v1/embeddings`` endpoint,
+    avoiding the need to ship ``torch``/``sentence-transformers`` in the
+    production image.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-small-zh-v1.5",
+        *,
+        api_key: Optional[str] = None,
+        base_url: str = "https://api.siliconflow.cn/v1",
+        timeout: float = 30.0,
+    ) -> None:
+        self._model_name = model_name
+        self._api_key = api_key or os.getenv("SILICONFLOW_API_KEY", "")
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        if not self._api_key:
+            raise ValueError(
+                "SiliconFlowEmbeddingFunction requires SILICONFLOW_API_KEY"
+            )
+
+    def _request(self, inputs: List[str]) -> List[List[float]]:
+        # ChromaDB may pass very long lists; batch to keep payloads sane.
+        embeddings: List[List[float]] = []
+        with httpx.Client(timeout=self._timeout) as client:
+            for start in range(0, len(inputs), 32):
+                batch = inputs[start:start + 32]
+                response = client.post(
+                    f"{self._base_url}/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self._model_name,
+                        "input": batch,
+                    },
+                )
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"SiliconFlow embeddings API returned "
+                        f"{response.status_code}: {response.text[:200]}"
+                    )
+                payload = response.json()
+                embeddings.extend(
+                    item["embedding"] for item in payload["data"]
+                )
+        return embeddings
+
+    # ---- ChromaDB EmbeddingFunction protocol ---------------------------------
+
+    def __call__(self, input: List[str]) -> List[List[float]]:  # noqa: A002
+        # ChromaDB 0.5.x EmbeddingFunction contract expects numpy arrays so
+        # that internal `.tolist()` / dtype coercion works; returning raw
+        # lists triggers AttributeError ('list' has no attribute 'tolist').
+        import numpy as np
+        return np.array(self._request(input), dtype=np.float32)
+
+    def name(self) -> str:
+        return "siliconflow_embedding"
+
+
+def build_siliconflow_embedding_function(
+    model_name: str = "BAAI/bge-small-zh-v1.5",
+    **kwargs: Any,
+) -> SiliconFlowEmbeddingFunction:
+    """Build a SiliconFlow-backed embedding function for ChromaDB."""
+    return SiliconFlowEmbeddingFunction(model_name=model_name, **kwargs)
 
 
 class BM25Index:

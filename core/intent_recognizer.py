@@ -62,10 +62,10 @@ class IntentResult:
 # ── Few-shot 模板（同时用于 LLM 示例和 Embedding 匹配）────────────────────────
 _TEMPLATES: Dict[IntentCategory, List[str]] = {
     IntentCategory.QUERY:      ["我的订单状态是什么？", "如何重置密码？", "快递什么时候到？"],
-    IntentCategory.COMPLAINT:  ["等了好几个小时！", "服务太差了！", "一直没人处理！"],
+    IntentCategory.COMPLAINT:  ["我要投诉", "商家服务态度不好", "等了好几个小时！", "服务太差了！", "一直没人处理！", "不满意你们的处理"],
     IntentCategory.REQUEST:    ["帮我取消订单", "我需要修改地址", "请协助退款"],
     IntentCategory.GREETING:   ["你好", "嗨，有人吗", "早上好"],
-    IntentCategory.ESCALATION: ["我要投诉！", "转人工客服", "找你们经理"],
+    IntentCategory.ESCALATION: ["转人工客服", "找你们经理", "给我升级处理"],
     IntentCategory.TECHNICAL:  ["应用一直崩溃", "无法登录", "出现500错误"],
     IntentCategory.BILLING:    ["为什么扣了两次款？", "申请退款", "发票问题"],
     IntentCategory.ACCOUNT:    ["修改邮箱", "注销账户", "更新个人信息"],
@@ -300,8 +300,8 @@ class IntentRecognizer:
         """策略 3：关键词模式匹配（同步，零延迟兜底）。"""
         msg = message.lower()
         patterns = {
-            IntentCategory.ESCALATION: ["投诉", "经理", "转人工", "supervisor"],
-            IntentCategory.COMPLAINT:  ["太差", "糟糕", "horrible", "等了很久"],
+            IntentCategory.ESCALATION: ["转人工", "经理", "supervisor", "人工客服"],
+            IntentCategory.COMPLAINT:  ["投诉", "太差", "糟糕", "horrible", "服务态度", "态度不好", "不满意", "等了很久"],
             IntentCategory.QUERY:      ["?", "？", "怎么", "什么", "status"],
             IntentCategory.REQUEST:    ["帮我", "需要", "please", "help"],
             IntentCategory.GREETING:   ["你好", "嗨", "hello", "hi"],

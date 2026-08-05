@@ -1,5 +1,5 @@
 """
-EchoMind 智能客服系统 — FastAPI 入口
+GGBot 智能客服系统 — FastAPI 入口
 
 启动时打印小熊饼干图案。
 所有核心组件在 lifespan 中初始化，通过环境变量配置。
@@ -11,6 +11,7 @@ import pathlib
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 BANNER = r"""
     ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ
    ╔══════════════════════╗
-   ║   EchoMind  v2.0     ║
+   ║   GGBot  v2.0     ║
    ║   智能客服 AI 系统    ║
    ╚══════════════════════╝
     ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ  ʕ•ᴥ•ʔ
@@ -113,10 +114,10 @@ async def _runtime_components(app: FastAPI):
     )
 
     # Skills：启动时从目录加载业务能力说明，并在 Agent 调用 LLM 时动态注入。
-    skills_dir = os.getenv("ECHOMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills"))
+    skills_dir = os.getenv("GGBOT_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills"))
     _skill_manager = SkillManager(
         root_dir=skills_dir,
-        max_prompt_chars=int(os.getenv("ECHOMIND_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        max_prompt_chars=int(os.getenv("GGBOT_SKILLS_MAX_PROMPT_CHARS", "5000")),
     )
     _skill_manager.load()
 
@@ -190,6 +191,7 @@ async def _runtime_components(app: FastAPI):
     _knowledge_runtime = KnowledgeRuntime.build(
         kb,
         enable_local_models=local_models_enabled(),
+        embedding_provider=os.getenv("RAG_EMBEDDING_PROVIDER"),
         embedding_model=os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5"),
         reranker_model=os.getenv("RAG_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
         relevance_threshold=float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0")),
@@ -250,7 +252,7 @@ async def _runtime_components(app: FastAPI):
         ),
     )
 
-    logger.info("EchoMind 已就绪")
+    logger.info("GGBot 已就绪")
     yield
 
 
@@ -277,12 +279,12 @@ async def lifespan(app: FastAPI):
             yield
     finally:
         await _shutdown_components()
-        logger.info("EchoMind 已关闭")
+        logger.info("GGBot 已关闭")
 
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="EchoMind 智能客服",
+    title="GGBot 智能客服",
     version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
@@ -645,9 +647,41 @@ async def run_eval(body: Optional[EvalRunInput] = None):
 
 
 # ── 交互式 CLI ────────────────────────────────────────────────────────────────
+# ANSI 颜色：用户=青色，客服=绿色，系统=黄色
+_CLI_CYAN = "\033[1;36m"      # 用户侧（加粗青）
+_CLI_GREEN = "\033[1;32m"     # 客服侧（加粗绿）
+_CLI_YELLOW = "\033[0;33m"    # 系统提示
+_CLI_DIM = "\033[2;37m"       # 暗灰（分隔线）
+_CLI_RESET = "\033[0m"
+
+
+def _redirect_logs_to_file():
+    """CLI 模式下把日志重定向到文件，避免污染终端对话界面。
+
+    日志按会话时间戳保存到 logs/cli-<timestamp>.log，终端只保留对话内容。
+    """
+    log_dir = pathlib.Path(_ROOT) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"cli-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+
+    root = logging.getLogger()
+    # 移除 basicConfig 默认的 stderr handler
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(root.level or logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    root.addHandler(file_handler)
+    return log_file
+
+
 async def _cli():
+    log_file = _redirect_logs_to_file()
     print(BANNER)
-    print("EchoMind CLI — 输入 quit 退出\n")
+    print("GGBot CLI — 输入 quit 退出")
+    print(f"日志已重定向到: {log_file}\n")
 
     from agents.agent_orchestrator import AgentOrchestrator, Request
     from memory.conversation_memory import MemoryManager, MsgRole
@@ -655,8 +689,8 @@ async def _cli():
 
     cfg = _anthropic_cfg()
     skill_manager = SkillManager(
-        root_dir=os.getenv("ECHOMIND_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills")),
-        max_prompt_chars=int(os.getenv("ECHOMIND_SKILLS_MAX_PROMPT_CHARS", "5000")),
+        root_dir=os.getenv("GGBOT_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills")),
+        max_prompt_chars=int(os.getenv("GGBOT_SKILLS_MAX_PROMPT_CHARS", "5000")),
     )
     skill_manager.load()
     orch = AgentOrchestrator(
@@ -679,12 +713,12 @@ async def _cli():
 
     while True:
         try:
-            msg = input("你: ").strip()
+            msg = input(f"{_CLI_CYAN}你{_CLI_RESET}: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n再见 ʕ•ᴥ•ʔ")
+            print(f"\n{_CLI_YELLOW}再见 ʕ•ᴥ•ʔ{_CLI_RESET}")
             break
         if not msg or msg.lower() in ("quit", "exit", "退出"):
-            print("再见 ʕ•ᴥ•ʔ")
+            print(f"{_CLI_YELLOW}再见 ʕ•ᴥ•ʔ{_CLI_RESET}")
             break
 
         ctx = await mem.get_context(user_id, conv_id, query=msg)
@@ -698,7 +732,10 @@ async def _cli():
         await mem.add_message(user_id, conv_id, MsgRole.USER, msg)
         await mem.add_message(user_id, conv_id, MsgRole.ASSISTANT, result.response)
 
-        print(f"\nEchoMind [{result.agent_type.value}]: {result.response}\n")
+        agent_tag = result.agent_type.value
+        print(f"\n{_CLI_GREEN}GGBot{_CLI_RESET} "
+              f"{_CLI_DIM}[{agent_tag}]{_CLI_RESET}: "
+              f"{result.response}\n")
 
 
 if __name__ == "__main__":

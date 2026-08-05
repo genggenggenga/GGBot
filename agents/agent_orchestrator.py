@@ -172,7 +172,7 @@ class BaseAgent:
 class GeneralAgent(BaseAgent):
     agent_type    = AgentType.GENERAL
     system_prompt = (
-        "你是 EchoMind 智能客服。友好、简洁地回答用户问题。"
+        "你是 GGBot 智能客服。友好、简洁地回答用户问题。"
         "如果问题超出你的能力范围，明确说明并建议转接专业客服。"
     )
 
@@ -210,7 +210,8 @@ class AgentOrchestrator:
         IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
         IntentCategory.BILLING:    AgentType.BILLING,
         IntentCategory.ACCOUNT:    AgentType.BILLING,
-        IntentCategory.ESCALATION: AgentType.ESCALATION,
+        IntentCategory.COMPLAINT:  AgentType.BILLING,   # 投诉 → 售后/账单 agent
+        IntentCategory.ESCALATION: AgentType.BILLING,    # 升级/转人工 → 售后 agent
         # 其余意图 → GENERAL（默认）
     }
 
@@ -318,11 +319,11 @@ class AgentOrchestrator:
         """
         三层路由决策：
           1. 意图映射
-          2. 紧急度覆盖（CRITICAL 直接升级）
+          2. 紧急度覆盖（CRITICAL 直接升级到 BILLING 售后）
           3. 默认 GENERAL
         """
         if urgency == UrgencyLevel.CRITICAL:
-            return AgentType.ESCALATION
+            return AgentType.BILLING
 
         if intent and intent in self._INTENT_ROUTING:
             target = self._INTENT_ROUTING[intent]

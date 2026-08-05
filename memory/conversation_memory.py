@@ -37,6 +37,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_memory_embedding_function():
+    """根据 RAG_EMBEDDING_PROVIDER 返回 embedding function 或 None。
+
+    与 mcp/knowledge_base.py 保持一致的策略，避免 ChromaDB 默认 ONNX
+    模型（all-MiniLM-L6-v2）的 79MB 运行时下载。
+    """
+    import os
+    provider = os.getenv("RAG_EMBEDDING_PROVIDER", "api").strip().lower()
+    model = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
+    if provider in {"api", "siliconflow"}:
+        from rag.indexes import build_siliconflow_embedding_function
+        return build_siliconflow_embedding_function(model)
+    if provider in {"local", "bge"}:
+        from rag.indexes import build_bge_embedding_function
+        return build_bge_embedding_function(model)
+    return None
+
+
 class MsgRole(Enum):
     USER      = "user"
     ASSISTANT = "assistant"
@@ -212,9 +230,16 @@ class MemoryManager:
                 )
 
         # 情景记忆：存储已完成会话/转人工的历史片段
-        self._episodic = chroma.get_or_create_collection("episodic")
         # 用户画像：存储稳定偏好
-        self._profile  = chroma.get_or_create_collection("user_profile")
+        # Embedding function 由 RAG_EMBEDDING_PROVIDER 控制（默认 SiliconFlow API，
+        # 避免 ChromaDB 默认 ONNX 模型的 79MB 下载）。
+        embedding_function = _resolve_memory_embedding_function()
+        self._episodic = chroma.get_or_create_collection(
+            "episodic", embedding_function=embedding_function
+        )
+        self._profile = chroma.get_or_create_collection(
+            "user_profile", embedding_function=embedding_function
+        )
 
     # ── 写入 ──────────────────────────────────────────────────────────────────
 

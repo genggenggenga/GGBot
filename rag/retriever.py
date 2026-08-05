@@ -1,7 +1,10 @@
 """Hybrid retrieval, reciprocal-rank fusion, reranking, and citations."""
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional, Protocol, Sequence
+
+import httpx
 
 from rag.indexes import DenseIndex
 from rag.models import Citation, DocumentChunk, RetrievalResult, SearchHit
@@ -35,6 +38,61 @@ class CrossEncoderReranker:
         pairs = [(query, chunk.content) for chunk in chunks]
         values = self._model.predict(pairs)  # type: ignore[attr-defined]
         return [float(value) for value in values]
+
+
+class SiliconFlowReranker:
+    """Reranker that delegates to the SiliconFlow ``/v1/rerank`` API.
+
+    Implements the same ``score`` contract as ``CrossEncoderReranker`` so it
+    can be used as a drop-in replacement without pulling in ``torch``.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-reranker-v2-m3",
+        *,
+        api_key: Optional[str] = None,
+        base_url: str = "https://api.siliconflow.cn/v1",
+        timeout: float = 30.0,
+    ) -> None:
+        self._model_name = model_name
+        self._api_key = api_key or os.getenv("SILICONFLOW_API_KEY", "")
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        if not self._api_key:
+            raise ValueError("SiliconFlowReranker requires SILICONFLOW_API_KEY")
+
+    def score(self, query: str, chunks: Sequence[DocumentChunk]) -> List[float]:
+        documents = [chunk.content for chunk in chunks]
+        if not documents:
+            return []
+        with httpx.Client(timeout=self._timeout) as client:
+            response = client.post(
+                f"{self._base_url}/rerank",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self._model_name,
+                    "query": query,
+                    "documents": documents,
+                    "return_documents": False,
+                },
+            )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"SiliconFlow rerank API returned "
+                f"{response.status_code}: {response.text[:200]}"
+            )
+        payload = response.json()
+        # Map API results back to the original chunk order.
+        scores = [0.0] * len(chunks)
+        for item in payload.get("results", []):
+            index = int(item["index"])
+            if 0 <= index < len(scores):
+                scores[index] = float(item["relevance_score"])
+        return scores
 
 
 class HybridRetriever:
