@@ -1,4 +1,5 @@
 """ToolRegistry integration for hybrid RAG."""
+import asyncio
 from typing import Iterable, Optional
 
 from core.tool_registry import LocalToolAdapter, ToolRegistry, ToolSpec, ToolType
@@ -12,8 +13,10 @@ def register_rag_tool(
     agent_names: Optional[Iterable[str]] = None,
 ) -> None:
     async def search_handler(params, context):
+        del context
         mode = params.get("mode", "rerank")
-        result = retriever.search(
+        result = await asyncio.to_thread(
+            retriever.search,
             params["query"],
             top_k=params.get("top_k", 5),
             candidate_k=params.get("candidate_k", 20),

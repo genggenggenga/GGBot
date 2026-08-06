@@ -13,6 +13,7 @@ from api.main import ChatRequest, ChatResponse
 from core.customer_agent_runtime import CustomerAgentRuntime
 from core.customer_agent_runtime import CustomerTurnResult
 from core.dialogue_state_tracker import DialogueStateTracker
+from core.agent_models import UnderstandingResult
 from core.intent_recognizer import IntentRecognizer
 from core.state_store import InMemoryStateStore
 from core.tool_registry import (
@@ -86,6 +87,10 @@ def build_runtime(*, eligible=True, fail_query=False):
         calls.append(("create_refund", dict(params)))
         return {"created": True, "refund_id": "REF-1001", **params}
 
+    async def create_ticket(params, context):
+        calls.append(("create_ticket", dict(params)))
+        return {"created": True, "ticket_id": "TKT-1001", **params}
+
     async def rag_search(params, context):
         calls.append(("rag_search", dict(params)))
         return {
@@ -105,6 +110,13 @@ def build_runtime(*, eligible=True, fail_query=False):
         "create_refund",
         create_refund,
         required=("order_id", "action_id"),
+        tool_type=ToolType.WRITE,
+    )
+    register_tool(
+        registry,
+        "create_ticket",
+        create_ticket,
+        required=("subject", "description", "action_id"),
         tool_type=ToolType.WRITE,
     )
     register_tool(registry, "rag_search", rag_search, required=("query",))
@@ -151,10 +163,74 @@ def test_refund_flow_clarifies_confirms_and_creates_once():
     assert "REF-1001" in third.response
     assert [name for name, _ in calls].count("create_refund") == 1
     assert traces.get(third.trace_id)[-1]["status"] == "completed"
+    assert traces.get(third.trace_id)[-1]["state_path"][0] == "acting"
 
     state = run(store.load("user-1", "conv-1"))
     assert state.pending_action is None
     assert "refund_request" in state.completed_goals
+    stats = runtime.get_stats()
+    assert stats["after_sales"]["total"] == 2
+    assert stats["after_sales"]["success_rate"] == 1.0
+
+
+def test_runtime_executes_all_structured_intents_and_composes_response():
+    runtime, store, calls, _ = build_runtime()
+
+    class CompositeRecognizer:
+        async def recognize_structured(
+            self,
+            message,
+            history=None,
+            current_state=None,
+        ):
+            return UnderstandingResult(
+                intents=["order_query", "logistics_query"],
+                primary_intent="order_query",
+                confidence=1.0,
+                extracted_slots={"order_id": "ORD-1001"},
+            )
+
+    runtime._recognizer = CompositeRecognizer()
+    result = run(runtime.run(
+        "user-1",
+        "conv-composite",
+        "查订单和物流",
+    ))
+
+    assert result.status == "completed"
+    assert result.agent_type == "order,logistics"
+    assert "订单 ORD-1001" in result.response
+    assert "当前物流状态" in result.response
+    assert [name for name, _ in calls] == [
+        "query_order",
+        "query_order",
+        "track_package",
+    ]
+    state = run(store.load("user-1", "conv-composite"))
+    assert state.completed_goals == ["order_query", "logistics_query"]
+
+
+def test_complaint_creates_handoff_ticket_after_confirmation():
+    runtime, store, calls, _ = build_runtime()
+
+    pending = run(runtime.run(
+        "user-1",
+        "conv-handoff",
+        "我要投诉，转人工客服",
+    ))
+    completed = run(runtime.run(
+        "user-1",
+        "conv-handoff",
+        "确认",
+    ))
+
+    assert pending.status == "awaiting_user"
+    assert "确认" in pending.response
+    assert completed.status == "completed"
+    assert "TKT-1001" in completed.response
+    assert [name for name, _ in calls] == ["create_ticket"]
+    state = run(store.load("user-1", "conv-handoff"))
+    assert "complaint" in state.completed_goals
 
 
 def test_refund_rejection_does_not_execute_write_tool():
@@ -240,6 +316,7 @@ def test_chat_endpoint_delegates_to_state_runtime_and_keeps_conv_id(monkeypatch)
         def __init__(self):
             self.messages = []
             self.events = []
+            self.profile_updates = []
 
         async def get_context(self, user_id, conv_id, query):
             return MemoryContext()
@@ -251,6 +328,9 @@ def test_chat_endpoint_delegates_to_state_runtime_and_keeps_conv_id(monkeypatch)
             self, user_id, conv_id, event_type, summary=None, metadata=None,
         ):
             self.events.append((user_id, conv_id, event_type.value, metadata))
+
+        async def update_profile(self, user_id, conv_id):
+            self.profile_updates.append((user_id, conv_id))
 
     class FakeRuntime:
         async def run(self, user_id, conv_id, message, history=None):
@@ -283,6 +363,7 @@ def test_chat_endpoint_delegates_to_state_runtime_and_keeps_conv_id(monkeypatch)
         "我要退款",
         "请提供需要处理的订单号。",
     ]
+    assert memory.profile_updates == [("user-1", "conv-api")]
 
 
 def test_policy_question_uses_rag_and_returns_citation():

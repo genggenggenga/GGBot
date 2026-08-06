@@ -423,6 +423,10 @@ class ConfirmationGate:
         self._pending.discard(action_id)
         self._confirmed.discard(action_id)
 
+    def complete(self, action_id: str) -> None:
+        """Release confirmation state after a successful write."""
+        self.reject(action_id)
+
     def is_confirmed(self, action_id: str) -> bool:
         return action_id in self._confirmed
 
@@ -559,7 +563,14 @@ class ToolRegistry:
                 )
 
         # 4. Delegate to adapter
-        return await adapter.call(params, context, use_cache=use_cache)
+        result = await adapter.call(params, context, use_cache=use_cache)
+        if (
+            spec.tool_type == ToolType.WRITE
+            and action_id is not None
+            and result.success
+        ):
+            self._confirmation_gate.complete(action_id)
+        return result
 
     # ── stats ─────────────────────────────────────────────────────────────────
 

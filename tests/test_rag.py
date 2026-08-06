@@ -1,4 +1,5 @@
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -238,6 +239,43 @@ def test_no_answer_when_below_threshold():
     assert result.reason == "no_relevant_evidence"
 
 
+def test_retriever_uses_mode_specific_thresholds():
+    chunk = make_chunk("a", "低相关内容")
+    dense = FakeDenseIndex([
+        SearchHit(chunk=chunk, score=0.15, dense_score=0.15),
+    ])
+    sparse = BM25Index()
+    sparse.add([chunk])
+    retriever = HybridRetriever(
+        dense,
+        sparse,
+        reranker=FakeReranker(),
+        dense_threshold=0.2,
+        rrf_threshold=0.01,
+        rerank_threshold=0.95,
+    )
+
+    dense_result = retriever.search(
+        "完全不同",
+        use_sparse=False,
+        use_reranker=False,
+    )
+    hybrid_result = retriever.search(
+        "低相关内容",
+        use_sparse=True,
+        use_reranker=False,
+    )
+    rerank_result = retriever.search(
+        "低相关内容",
+        use_sparse=True,
+        use_reranker=True,
+    )
+
+    assert dense_result.answered is False
+    assert hybrid_result.answered is True
+    assert rerank_result.answered is False
+
+
 @pytest.mark.asyncio
 async def test_rag_search_is_registered_as_read_only_tool():
     chunk = make_chunk("a", "七天内可退款")
@@ -256,6 +294,31 @@ async def test_rag_search_is_registered_as_read_only_tool():
     assert result.success is True
     assert result.data["answered"] is True
     assert result.data["citations"][0]["source"] == "policy.md"
+
+
+@pytest.mark.asyncio
+async def test_rag_search_runs_blocking_retrieval_off_event_loop():
+    event_loop_thread = threading.get_ident()
+    search_threads = []
+
+    class Retriever:
+        def search(self, query, **kwargs):
+            search_threads.append(threading.get_ident())
+            from rag.models import RetrievalResult
+            return RetrievalResult(query=query, answered=False)
+
+    registry = ToolRegistry()
+    register_rag_tool(registry, Retriever(), agent_names=["knowledge"])
+
+    result = await registry.call(
+        "knowledge",
+        "rag_search",
+        {"query": "退款"},
+    )
+
+    assert result.success
+    assert search_threads
+    assert search_threads[0] != event_loop_thread
 
 
 @pytest.mark.asyncio

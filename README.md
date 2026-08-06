@@ -82,14 +82,15 @@ curl -s http://localhost:8000/traces/<trace_id>
 | 指标 | 实测值 |
 |------|--------|
 | Intent Accuracy / Macro-F1 | 1.0000 / 1.0000 |
+| User Act Accuracy | 1.0000 |
 | Slot F1 / DST Joint Goal Accuracy | 1.0000 / 1.0000 |
 | Recall@5 / MRR | 0.9000 / 0.8500 |
-| Tool Selection / Parameter Accuracy | 0.9000 / 0.4000 |
-| Task Completion Rate | 0.6000 |
-| Citation Precision / Faithfulness | 0.0000 / 0.0000 |
+| Tool Selection / Parameter Accuracy | 1.0000 / 1.0000 |
+| Task Completion Rate | 1.0000 |
+| Citation Precision / Faithfulness | 0.4091 / 0.9000 |
 
 消融结果位于 `data/eval/ablation_report.json`。Dense 与 Hybrid 的 Recall@5、MRR 均为 `0.9000`、`0.8500`；Hybrid + Reranker 的 Recall@5 仍为 `0.9000`，MRR 降至 `0.5250`。这说明当前确定性评测集没有证明 BM25 融合带来增益，测试用 Reranker 也未改善排序，不能据此宣称检索效果提升。
 
-`citation_precision` 和 `faithfulness_rate` 均为 `0.0000`，表示当前固定样本与本地评测链路尚未形成可计分的引用证据闭环，不应解读为已完成引用忠实度优化。
+Tool 与 E2E 用例现在通过真实 `CustomerAgentRuntime → TurnEngine → DomainAgentRuntime → ToolRegistry` 执行。`citation_precision` 和 `faithfulness_rate` 仍是确定性 fixture 上的证据覆盖指标，不等价于真实模型回答的语义忠实度。
 
-`data/eval/baseline_comparison.json` 的 `comparison_type` 为 `synthetic_or_legacy_rules`。其中规则对照任务完成率为 `0.4000`，当前实现为 `0.6000`，仅用于本地回归对照，不是真实线上基线，也不能用于宣称生产效果或线上提升。
+`data/eval/baseline_comparison.json` 的 `comparison_type` 为 `synthetic_or_legacy_rules`。该文件仅用于本地回归对照，不是真实线上基线，也不能用于宣称生产效果或线上提升。

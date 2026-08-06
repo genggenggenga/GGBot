@@ -16,12 +16,14 @@ Embedding 策略（由 RAG_EMBEDDING_PROVIDER 控制）：
   - local: 本地 BGE 模型（需 sentence-transformers/torch）
   - off:   ChromaDB 默认 ONNX 模型（all-MiniLM-L6-v2，会下载 79MB）
 """
-import hashlib
 import logging
 import os
 from typing import Any, Dict, List
 
 import chromadb
+
+from rag.loaders import chunk_sections
+from rag.models import DocumentChunk, LoadedSection
 
 logger = logging.getLogger(__name__)
 
@@ -89,32 +91,53 @@ class KnowledgeBase:
 
     # ── 文档管理 ──────────────────────────────────────────────────────────────
 
-    def add_documents(self, documents: List[Dict[str, str]]) -> int:
+    def add_documents(self, documents: List[Dict[str, Any]]) -> int:
         """
         批量导入文档到知识库。
 
         documents 格式: [{"title": "...", "content": "..."}, ...]
         长文档会自动切片（每片 500 字）。
         """
-        ids, docs, metas = [], [], []
+        sections = [
+            LoadedSection(
+                text=str(document.get("content", "")),
+                source=str(
+                    document.get("source")
+                    or document.get("title")
+                    or "inline"
+                ),
+                title=str(document.get("title", "")),
+                section=str(document.get("section", "")),
+                page=document.get("page"),
+                metadata=dict(document.get("metadata", {})),
+            )
+            for document in documents
+            if str(document.get("content", "")).strip()
+        ]
+        return self.add_chunks(chunk_sections(sections))
 
-        for doc in documents:
-            title   = doc.get("title", "")
-            content = doc.get("content", "")
-            chunks  = self._chunk_text(content, chunk_size=500)
-
-            for i, chunk in enumerate(chunks):
-                doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
-                ids.append(doc_id)
-                docs.append(chunk)
-                metas.append({"title": title, "chunk_index": i, "total_chunks": len(chunks)})
-
-        if ids:
-            # ChromaDB 会自动生成 Embedding
-            self._collection.add(ids=ids, documents=docs, metadatas=metas)
-            logger.info(f"知识库导入 {len(ids)} 个文档片段")
-
-        return len(ids)
+    def add_chunks(self, chunks: List[DocumentChunk]) -> int:
+        """Persist canonical chunks and their full citation metadata."""
+        if not chunks:
+            return 0
+        self._collection.upsert(
+            ids=[chunk.chunk_id for chunk in chunks],
+            documents=[chunk.content for chunk in chunks],
+            metadatas=[
+                {
+                    "source": chunk.source,
+                    "title": chunk.title,
+                    "section": chunk.section,
+                    "page": chunk.page or 0,
+                    "chunk_index": chunk.chunk_index,
+                    "parent_id": chunk.parent_id,
+                    **chunk.metadata,
+                }
+                for chunk in chunks
+            ],
+        )
+        logger.info("知识库导入 %s 个 canonical chunks", len(chunks))
+        return len(chunks)
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """

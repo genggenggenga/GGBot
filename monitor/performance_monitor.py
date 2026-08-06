@@ -22,7 +22,7 @@ from enum import Enum
 from typing import Any, Deque, Dict, List, Optional
 
 import httpx
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import Counter, Gauge, start_http_server
 
 logger = logging.getLogger(__name__)
 
@@ -120,22 +120,32 @@ class PerformanceMonitor:
 
     def __init__(
         self,
-        orchestrator,
-        tool_manager,
+        orchestrator=None,
+        tool_manager=None,
+        *,
+        runtime=None,
+        tool_registry=None,
         interval_s:       float = 10.0,
         webhook_url:      Optional[str] = None,
         prometheus_port:  Optional[int] = None,   # None = 不启动
+        anomaly_sensitivity: float = 2.5,
     ):
-        self._orchestrator = orchestrator
-        self._tool_manager = tool_manager
+        self._agent_source = runtime or orchestrator
+        self._tool_source = tool_registry or tool_manager
+        if self._agent_source is None or self._tool_source is None:
+            raise ValueError("monitor requires Agent and Tool stats sources")
         self._interval     = interval_s
         self._webhook      = webhook_url
-        self._detector     = AnomalyDetector()
+        self._detector     = AnomalyDetector(
+            sensitivity=anomaly_sensitivity,
+        )
 
         self._alerts:      List[Alert]      = []
         self._suggestions: List[Suggestion] = []
         self._active       = False
         self._task:        Optional[asyncio.Task] = None
+        self._webhook_tasks: set[asyncio.Task] = set()
+        self._last_request_total = 0
 
         # Prometheus 指标（可选）
         self._prom: Dict[str, Any] = {}
@@ -145,7 +155,11 @@ class PerformanceMonitor:
     def _setup_prometheus(self, port: int) -> None:
         self._prom = {
             "agent_success_rate": Gauge("agent_success_rate", "Agent 成功率", ["agent"]),
-            "agent_latency_ms":   Histogram("agent_latency_ms", "Agent 延迟", ["agent"]),
+            "agent_avg_latency_ms": Gauge(
+                "agent_avg_latency_ms",
+                "Agent 平均延迟",
+                ["agent"],
+            ),
             "tool_success_rate":  Gauge("tool_success_rate", "工具成功率", ["tool"]),
             "requests_total":     Counter("requests_total", "总请求数"),
         }
@@ -169,6 +183,9 @@ class PerformanceMonitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._webhook_tasks:
+            tasks = list(self._webhook_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # ── 采集循环 ──────────────────────────────────────────────────────────────
 
@@ -187,8 +204,8 @@ class PerformanceMonitor:
         关键：这里读取的 stats 就是 Orchestrator/ToolManager 在处理请求时
         实时更新的数据，Monitor 不需要额外埋点。
         """
-        agent_stats = self._orchestrator.get_stats()
-        tool_stats  = self._tool_manager.get_stats()
+        agent_stats = self._agent_source.get_stats()
+        tool_stats  = self._tool_source.get_stats()
         routing_penalties: Dict[str, float] = {}
 
         # ── Agent 指标 ────────────────────────────────────────────────────────
@@ -209,7 +226,7 @@ class PerformanceMonitor:
             # Prometheus
             if "agent_success_rate" in self._prom:
                 self._prom["agent_success_rate"].labels(agent=agent_key).set(sr)
-                self._prom["agent_latency_ms"].labels(agent=agent_key).observe(ms)
+                self._prom["agent_avg_latency_ms"].labels(agent=agent_key).set(ms)
 
             routing_penalties[agent_key] = self._routing_penalty(sr, ms)
 
@@ -235,7 +252,17 @@ class PerformanceMonitor:
                 ))
 
         # ── 路由优化建议 ──────────────────────────────────────────────────────
-        updater = getattr(self._orchestrator, "update_routing_penalties", None)
+        total_requests = sum(
+            int(stats.get("total", 0))
+            for stats in agent_stats.values()
+        )
+        if "requests_total" in self._prom and total_requests > self._last_request_total:
+            self._prom["requests_total"].inc(
+                total_requests - self._last_request_total,
+            )
+        self._last_request_total = total_requests
+
+        updater = getattr(self._agent_source, "update_routing_penalties", None)
         if updater:
             updater(routing_penalties)
         self._generate_routing_suggestions(agent_stats)
@@ -256,19 +283,41 @@ class PerformanceMonitor:
         threshold, severity, operator = self.THRESHOLDS[metric]
         triggered = (operator == "less_than" and value < threshold) or \
                     (operator == "greater_than" and value > threshold)
+        metric_key = f"{metric}:{label}"
+        existing = next(
+            (
+                alert for alert in self._alerts
+                if alert.metric == metric_key and not alert.resolved
+            ),
+            None,
+        )
         if triggered:
+            message = f"{label} 的 {metric} = {value:.3f}，阈值 {threshold}"
+            if existing is not None:
+                existing.severity = severity
+                existing.message = message
+                existing.value = value
+                existing.threshold = threshold
+                existing.ts = datetime.now().isoformat()
+                return
             alert = Alert(
                 severity=severity,
-                metric=f"{metric}:{label}",
-                message=f"{label} 的 {metric} = {value:.3f}，阈值 {threshold}",
+                metric=metric_key,
+                message=message,
                 value=value,
                 threshold=threshold,
             )
             self._alerts.append(alert)
             logger.warning(f"[{severity.value.upper()}] {alert.message}")
-            # 异步发送 Webhook（不阻塞采集循环）
             if self._webhook:
-                asyncio.create_task(self._send_webhook(alert))
+                task = asyncio.create_task(
+                    self._send_webhook(alert),
+                    name=f"monitor-webhook:{metric_key}",
+                )
+                self._webhook_tasks.add(task)
+                task.add_done_callback(self._webhook_tasks.discard)
+        elif existing is not None:
+            existing.resolved = True
 
     def _generate_routing_suggestions(self, agent_stats: Dict[str, Any]) -> None:
         """
@@ -307,8 +356,8 @@ class PerformanceMonitor:
     def summary(self) -> Dict[str, Any]:
         """返回当前监控摘要，供 API 层暴露。"""
         return {
-            "agent_stats":   self._orchestrator.get_stats(),
-            "tool_stats":    self._tool_manager.get_stats(),
+            "agent_stats":   self._agent_source.get_stats(),
+            "tool_stats":    self._tool_source.get_stats(),
             "active_alerts": [asdict(a) for a in self._alerts if not a.resolved][-10:],
             "suggestions":   [
                 {"title": s.title, "action": s.action, "priority": s.priority}

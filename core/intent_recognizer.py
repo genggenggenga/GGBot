@@ -196,7 +196,13 @@ class IntentRecognizer:
         ``recognize()`` is unchanged.
         """
         # 1. Try deterministic fast-track
-        ft = fast_track_extract(message)
+        confirmation_pending = (
+            (current_state or {}).get("confirmation_status") == "pending"
+        )
+        ft = fast_track_extract(
+            message,
+            confirmation_pending=confirmation_pending,
+        )
         result = build_understanding_from_fast_track(ft, message)
         if result is not None and result.confidence >= 0.9:
             active_intent = (current_state or {}).get("active_intent")
@@ -223,7 +229,7 @@ class IntentRecognizer:
             return await understand_with_llm(message, _llm_fn, current_state)
         except Exception as ex:
             logger.warning(f"recognize_structured LLM call failed: {ex}")
-            return make_fallback_understanding(message)
+            return make_fallback_understanding(message, current_state)
 
     async def _llm_recognize(
         self,

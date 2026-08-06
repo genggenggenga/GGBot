@@ -18,18 +18,14 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
-import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.agent_models import (
     ConfirmationStatus,
     DialogueState,
-    Observation,
-    PendingAction,
     UnderstandingResult,
-    UserAct,
 )
 from core.dialogue_state_tracker import DialogueStateTracker
 from core.nlu_fast_track import fast_track_extract, build_understanding_from_fast_track
@@ -37,11 +33,13 @@ from core.nlu_llm import make_fallback_understanding
 from core.state_store import InMemoryStateStore
 from core.tool_registry import LocalToolAdapter, ToolRegistry, ToolSpec, ToolType
 from core.trace_store import TraceStore
+from rag.models import DocumentChunk
 
 logger = logging.getLogger(__name__)
 
 _EVAL_DIR = pathlib.Path(__file__).parent.parent / "data" / "eval"
 _CASES_FILE = _EVAL_DIR / "customer_agent_cases.json"
+_EVAL_DATE = date(2026, 8, 7)
 
 
 # ── Fake embedding / reranker for hybrid retrieval ───────────────────────────
@@ -143,7 +141,11 @@ async def _check_refund(params: Dict, ctx: Optional[Dict]) -> Dict:
     if order is None:
         return {"eligible": False, "order_id": oid, "reason": "order_not_found"}
     rfu = order.get("refundable_until")
-    eligible = order["status"] == "delivered" and rfu is not None
+    eligible = (
+        order["status"] == "delivered"
+        and rfu is not None
+        and _EVAL_DATE <= date.fromisoformat(rfu)
+    )
     return {"eligible": eligible, "order_id": oid, "reason":
             "within_refund_window" if eligible else "outside_refund_window"}
 
@@ -176,23 +178,56 @@ async def _rag_search(params: Dict, ctx: Optional[Dict]) -> Dict:
             "reason": "no_indexed_knowledge_in_local_eval"}
 
 
-def _build_tool_registry() -> ToolRegistry:
-    """Build a ToolRegistry with mock MCP tools for local eval."""
+def _build_tool_registry(
+    *,
+    call_log: Optional[List[Dict[str, Any]]] = None,
+    fail_tools: Optional[set[str]] = None,
+    retriever: Optional[Any] = None,
+    rag_mode: str = "hybrid",
+) -> ToolRegistry:
+    """Build deterministic tools while recording the calls made by Agents."""
     registry = ToolRegistry()
+    call_log = call_log if call_log is not None else []
+    fail_tools = fail_tools or set()
+
+    async def rag_handler(params: Dict, ctx: Optional[Dict]) -> Dict:
+        if retriever is None:
+            return await _rag_search(params, ctx)
+        result = retriever.search(
+            params.get("query", ""),
+            top_k=params.get("top_k", 5),
+            candidate_k=params.get("candidate_k", 10),
+            use_sparse=rag_mode != "dense",
+            use_reranker=rag_mode == "rerank",
+        )
+        return result.model_dump(mode="json")
+
     for name, handler, tool_type, required in [
         ("query_order", _query_order, ToolType.READ, ["order_id"]),
         ("track_package", _track_package, ToolType.READ, ["order_id"]),
         ("check_refund_eligibility", _check_refund, ToolType.READ, ["order_id"]),
         ("create_refund", _create_refund, ToolType.WRITE, ["order_id", "action_id"]),
         ("create_ticket", _create_ticket, ToolType.WRITE, ["subject", "action_id"]),
-        ("rag_search", _rag_search, ToolType.READ, ["query"]),
+        ("rag_search", rag_handler, ToolType.READ, ["query"]),
     ]:
+        def wrap(tool_name, tool_handler):
+            async def recorded(params, context):
+                call_log.append({
+                    "tool": tool_name,
+                    "params": dict(params),
+                })
+                if tool_name in fail_tools:
+                    raise RuntimeError(f"forced failure: {tool_name}")
+                return await tool_handler(params, context)
+
+            return recorded
+
         spec = ToolSpec(
             name=name, description=f"Mock {name}",
             input_schema={"type": "object", "properties": {}, "required": required},
             tool_type=tool_type, timeout_s=5.0,
         )
-        registry.register(LocalToolAdapter(spec, handler))
+        registry.register(LocalToolAdapter(spec, wrap(name, handler)))
     registry.set_agent_whitelist("order", {"query_order", "query_payment"})
     registry.set_agent_whitelist("logistics", {"query_order", "track_package", "rag_search"})
     registry.set_agent_whitelist("after_sales", {
@@ -208,7 +243,12 @@ def _build_tool_registry() -> ToolRegistry:
 
 def _nlu_fast(message: str, current_state: Optional[Dict] = None) -> UnderstandingResult:
     """Determine intent and slots using only the deterministic fast-track."""
-    ft = fast_track_extract(message)
+    ft = fast_track_extract(
+        message,
+        confirmation_pending=(
+            (current_state or {}).get("confirmation_status") == "pending"
+        ),
+    )
     result = build_understanding_from_fast_track(ft, message)
     if result is not None and result.confidence >= 0.9:
         active_intent = (current_state or {}).get("active_intent")
@@ -221,7 +261,64 @@ def _nlu_fast(message: str, current_state: Optional[Dict] = None) -> Understandi
                 if active_intent in INTENT_SCHEMAS else None,
             })
         return result
-    return make_fallback_understanding(message)
+    return make_fallback_understanding(message, current_state)
+
+
+class _DeterministicRecognizer:
+    """Structured recognizer used by local runtime evaluation without network."""
+
+    async def recognize_structured(
+        self,
+        message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+        current_state: Optional[Dict[str, Any]] = None,
+    ) -> UnderstandingResult:
+        del history
+        return _nlu_fast(message, current_state)
+
+
+def _build_eval_runtime(
+    *,
+    retriever: Any,
+    rag_mode: str,
+    call_log: List[Dict[str, Any]],
+    fail_tools: Optional[set[str]] = None,
+):
+    """Assemble the same runtime classes used by the /chat endpoint."""
+    from agents.domain_agents import (
+        AfterSalesAgent,
+        DomainAgentRuntime,
+        KnowledgeAgent,
+        LogisticsAgent,
+        OrderAgent,
+        Router,
+    )
+    from core.customer_agent_runtime import CustomerAgentRuntime
+    from core.turn_engine import TurnEngine
+
+    store = InMemoryStateStore()
+    registry = _build_tool_registry(
+        call_log=call_log,
+        fail_tools=fail_tools,
+        retriever=retriever,
+        rag_mode=rag_mode,
+    )
+    router = Router()
+    domain_runtime = DomainAgentRuntime(router, {
+        "knowledge": KnowledgeAgent(registry),
+        "order": OrderAgent(registry),
+        "logistics": LogisticsAgent(registry),
+        "after_sales": AfterSalesAgent(registry),
+    })
+    runtime = CustomerAgentRuntime(
+        recognizer=_DeterministicRecognizer(),
+        tracker=DialogueStateTracker(),
+        turn_engine=TurnEngine(store),
+        domain_runtime=domain_runtime,
+        router=router,
+        trace_store=TraceStore(),
+    )
+    return runtime, store
 
 
 # ── Per-case execution ──────────────────────────────────────────────────────
@@ -241,6 +338,9 @@ class CaseResult:
     predicted_status: Optional[str] = None
     expected_status: Optional[str] = None
     dialogue_state: Optional[Dict[str, Any]] = None
+    observed_tools: List[str] = field(default_factory=list)
+    citations: List[Dict[str, Any]] = field(default_factory=list)
+    grounded: Optional[bool] = None
     completed: bool = False
     error: Optional[str] = None
 
@@ -254,21 +354,12 @@ async def _execute_dst_case(
     state = DialogueState()
     last_intent = None
     last_slots: Dict[str, Any] = {}
-    expected_slots: Dict[str, Any] = {}
 
     for turn_text in turns:
         understanding = _nlu_fast(turn_text, state.model_dump(mode="json"))
         state = tracker.update(state, understanding)
         last_intent = state.active_intent
         last_slots = dict(state.slots)
-        # Extract expected slots from fast-track (ground truth from text)
-        ft = fast_track_extract(turn_text)
-        for k, v in ft.slots.items():
-            expected_slots[k] = v
-        if ft.corrected_slots:
-            for k in ft.corrected_slots:
-                if k in ft.slots:
-                    expected_slots[k] = ft.slots[k]
 
     predicted_status = "completed"
     if state.missing_slots:
@@ -282,7 +373,7 @@ async def _execute_dst_case(
         predicted_intent=last_intent,
         expected_intent=case.get("expected_intent"),
         predicted_slots=last_slots,
-        expected_slots=expected_slots,
+        expected_slots=dict(case.get("expected_slots", {})),
         dialogue_state=state.model_dump(mode="json"),
         completed=predicted_status == "completed" or predicted_status == "awaiting_user",
     )
@@ -290,41 +381,53 @@ async def _execute_dst_case(
 
 async def _execute_tool_case(
     case: Dict[str, Any],
-    registry: ToolRegistry,
+    retriever: Any,
+    mode: str,
 ) -> CaseResult:
-    """Execute a tool-selection case."""
-    message = case.get("message", "")
-    understanding = _nlu_fast(message)
+    """Execute a tool case through the real customer-agent runtime."""
+    calls: List[Dict[str, Any]] = []
+    runtime, store = _build_eval_runtime(
+        retriever=retriever,
+        rag_mode=mode,
+        call_log=calls,
+        fail_tools=set(case.get("fail_tools", [])),
+    )
+    turns = case.get("turns") or [case.get("message", "")]
+    result = None
+    conv_id = f"eval-{case['id']}"
+    for turn in turns:
+        result = await runtime.run("eval-user", conv_id, turn)
 
-    from agents.domain_agents import Router
-    router = Router()
-    ds = DialogueState(active_intent=understanding.primary_intent,
-                       slots=understanding.extracted_slots)
-    agent_name = router.route(ds)
-
-    _AGENT_DEFAULT_TOOL = {
-        "order": "query_order",
-        "logistics": "track_package",
-        "after_sales": "check_refund_eligibility",
-        "knowledge": "rag_search",
-    }
-    predicted_tool = _AGENT_DEFAULT_TOOL.get(agent_name)
-    if "退款资格" in message:
-        predicted_tool = "check_refund_eligibility"
-    elif "提交" in message and "退款" in message:
-        predicted_tool = "create_refund"
-    elif "退款工具失败" in message:
-        predicted_tool = "create_ticket"
-    elif "退款政策" in message or "配送" in message:
-        predicted_tool = "rag_search"
+    state = await store.load("eval-user", conv_id)
+    observed_tools = [item["tool"] for item in calls]
+    predicted_tool = observed_tools[-1] if observed_tools else None
+    expected_tool = case.get("expected_tool")
+    expected_params = dict(case.get("expected_params", {}))
+    predicted_params: Dict[str, Any] = {}
+    matching = next(
+        (
+            item for item in reversed(calls)
+            if item["tool"] == predicted_tool
+        ),
+        None,
+    )
+    if matching is not None:
+        predicted_params = {
+            key: matching["params"].get(key)
+            for key in expected_params
+        }
 
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
-        predicted_intent=understanding.primary_intent,
+        predicted_intent=result.intent if result else None,
         predicted_tool=predicted_tool,
-        expected_tool=case.get("expected_tool"),
-        predicted_slots=understanding.extracted_slots,
+        expected_tool=expected_tool,
+        predicted_slots=predicted_params,
+        expected_slots=expected_params,
+        predicted_status=result.status if result else None,
+        dialogue_state=state.model_dump(mode="json") if state else None,
+        observed_tools=observed_tools,
         completed=True,
     )
 
@@ -344,90 +447,67 @@ async def _execute_rag_case(
         use_reranker=(mode == "rerank"),
     )
     ranked_ids = [hit.chunk.chunk_id for hit in result.hits]
+    citations = [
+        {
+            **citation.model_dump(mode="json"),
+            "supported": citation.chunk_id in relevant_ids,
+        }
+        for citation in result.citations
+    ]
+    grounded = (
+        (not relevant_ids and not result.answered)
+        or (
+            bool(relevant_ids)
+            and result.answered
+            and any(chunk_id in relevant_ids for chunk_id in ranked_ids)
+        )
+    )
 
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
         predicted_slots={"ranked_ids": ranked_ids, "relevant_ids": list(relevant_ids)},
+        citations=citations,
+        grounded=grounded,
         completed=True,
     )
 
 
 async def _execute_e2e_case(
     case: Dict[str, Any],
-    tracker: DialogueStateTracker,
-    registry: ToolRegistry,
+    retriever: Any,
+    mode: str,
 ) -> CaseResult:
-    """Execute an end-to-end case through the full pipeline."""
-    turns = case.get("turns", [])
-    state = DialogueState()
-
-    from agents.domain_agents import (
-        AfterSalesAgent, DomainAgentRuntime, KnowledgeAgent,
-        LogisticsAgent, OrderAgent, Router,
+    """Execute all turns through CustomerAgentRuntime and TurnEngine."""
+    calls: List[Dict[str, Any]] = []
+    runtime, store = _build_eval_runtime(
+        retriever=retriever,
+        rag_mode=mode,
+        call_log=calls,
+        fail_tools=set(case.get("fail_tools", [])),
     )
-    router = Router()
-    domain_runtime = DomainAgentRuntime(router, {
-        "knowledge": KnowledgeAgent(registry),
-        "order": OrderAgent(registry),
-        "logistics": LogisticsAgent(registry),
-        "after_sales": AfterSalesAgent(registry),
-    })
-
-    for turn_text in turns:
-        understanding = _nlu_fast(turn_text, state.model_dump(mode="json"))
-        state = tracker.update(state, understanding)
-
-        if state.missing_slots:
-            continue
-
-        if (state.pending_action is not None
-            and state.confirmation_status == ConfirmationStatus.CONFIRMED):
-            registry.confirm_action(state.pending_action.action_id)
-
-        agent_name = router.route(state)
-        agent = domain_runtime._agents.get(agent_name)
-        if agent:
-            try:
-                agent_result = await agent.execute(state, turn_text)
-                if agent_result.pending_action is not None:
-                    state = DialogueState(
-                        active_intent=state.active_intent,
-                        slots=dict(state.slots),
-                        required_slots=list(state.required_slots),
-                        missing_slots=list(state.missing_slots),
-                        pending_action=agent_result.pending_action,
-                        confirmation_status=ConfirmationStatus.PENDING,
-                        completed_goals=list(state.completed_goals),
-                        last_agent=state.last_agent,
-                        state_version=state.state_version + 1,
-                    )
-                elif agent_result.completed:
-                    state = tracker.mark_goal_completed(
-                        state, state.active_intent or "unknown"
-                    )
-            except Exception as ex:
-                logger.warning(f"E2E agent failed for {case['id']}: {ex}")
-
-    predicted_status = "completed"
-    if state.missing_slots:
-        predicted_status = "awaiting_user"
-    if state.confirmation_status == ConfirmationStatus.PENDING:
-        predicted_status = "awaiting_user"
-    if case.get("expected_status") == "failed":
-        predicted_status = "completed"
+    conv_id = f"eval-{case['id']}"
+    result = None
+    for turn_text in case.get("turns", []):
+        result = await runtime.run("eval-user", conv_id, turn_text)
 
     expected_status = case.get("expected_status", "completed")
+    predicted_status = result.status if result else None
     completed = predicted_status == expected_status
+    state = await store.load("eval-user", conv_id)
 
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
         predicted_status=predicted_status,
         expected_status=expected_status,
-        predicted_intent=state.active_intent,
-        predicted_slots=dict(state.slots),
-        dialogue_state=state.model_dump(mode="json"),
+        predicted_intent=result.intent if result else None,
+        expected_intent=case.get("expected_intent"),
+        predicted_slots=dict(state.slots) if state else {},
+        expected_slots=dict(case.get("expected_slots", {})),
+        dialogue_state=state.model_dump(mode="json") if state else None,
+        observed_tools=[item["tool"] for item in calls],
+        citations=list(result.citations) if result else [],
         completed=completed,
     )
 
@@ -437,7 +517,7 @@ async def _execute_nlu_case(
 ) -> CaseResult:
     """Execute an NLU intent/act/slot case."""
     message = case.get("message", "")
-    understanding = _nlu_fast(message)
+    understanding = _nlu_fast(message, case.get("current_state"))
 
     return CaseResult(
         case_id=case["id"],
@@ -447,6 +527,7 @@ async def _execute_nlu_case(
         predicted_act=understanding.user_act.value,
         expected_act=case.get("expected_act"),
         predicted_slots=understanding.extracted_slots,
+        expected_slots=dict(case.get("expected_slots", {})),
         completed=True,
     )
 
@@ -503,6 +584,16 @@ def _compute_all_metrics(
 
     intent_results = [r for r in nlu_cases + dst_cases if r.expected_intent is not None]
     intent_metrics = _compute_intent_metrics(intent_results)
+    act_pairs = [
+        (result.expected_act, result.predicted_act)
+        for result in nlu_cases
+        if result.expected_act is not None
+    ]
+    act_accuracy = (
+        sum(expected == predicted for expected, predicted in act_pairs)
+        / len(act_pairs)
+        if act_pairs else 0.0
+    )
 
     dst_expected = [r.expected_slots for r in dst_cases if r.expected_slots]
     dst_predicted = [r.predicted_slots for r in dst_cases if r.expected_slots]
@@ -529,12 +620,21 @@ def _compute_all_metrics(
     completion_data = [{"completed": r.completed} for r in e2e_cases]
     tcr = task_completion_rate(completion_data) if e2e_cases else 0.0
 
-    citation_prec = 0.0
-    faith = 0.0
+    citation_cases = [
+        {"citations": result.citations}
+        for result in rag_cases
+    ]
+    grounded_cases = [
+        {"grounded": result.grounded}
+        for result in rag_cases
+    ]
+    citation_prec = citation_precision(citation_cases)
+    faith = faithfulness_rate(grounded_cases)
 
     return {
         "intent_accuracy": intent_metrics["accuracy"],
         "intent_macro_f1": intent_metrics["macro_f1"],
+        "user_act_accuracy": round(act_accuracy, 4),
         "slot_f1": slot_metrics["f1"],
         "slot_precision": slot_metrics["precision"],
         "slot_recall": slot_metrics["recall"],
@@ -569,14 +669,12 @@ async def run_local_eval(
 ) -> EvalReport:
     """Run the full evaluation on the 50 fixed cases."""
     tracker = DialogueStateTracker()
-    registry = _build_tool_registry()
 
     from rag.retriever import HybridRetriever
     dense = FakeDenseIndex()
     sparse = FakeSparseIndex()
     reranker = FakeReranker()
 
-    from rag.models import DocumentChunk
     if seed_chunks is None:
         seed_chunks = _default_seed_chunks()
     dense.add(list(seed_chunks))
@@ -595,14 +693,17 @@ async def run_local_eval(
 
     executors = {
         "DST": ("dst", lambda case: _execute_dst_case(case, tracker)),
-        "TOOL": ("tool", lambda case: _execute_tool_case(case, registry)),
+        "TOOL": (
+            "tool",
+            lambda case: _execute_tool_case(case, retriever, rag_mode),
+        ),
         "RAG": (
             "rag",
             lambda case: _execute_rag_case(case, retriever, mode=rag_mode),
         ),
         "E2E": (
             "e2e",
-            lambda case: _execute_e2e_case(case, tracker, registry),
+            lambda case: _execute_e2e_case(case, retriever, rag_mode),
         ),
         "NLU": ("nlu", _execute_nlu_case),
     }

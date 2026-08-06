@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from agents.domain_agents import (
     AFTER_SALES_AGENT,
     KNOWLEDGE_AGENT,
@@ -18,6 +20,7 @@ from core.agent_models import (
     ConfirmationStatus,
     DialogueState,
     Observation,
+    PendingAction,
 )
 from core.skill_loader import SkillManager
 from core.tool_registry import (
@@ -86,6 +89,7 @@ def test_order_agent_uses_tool_observation():
     assert result.success
     assert result.observations[0].name == "query_order"
     assert "paid" in result.response
+    assert "query_payment" not in agent.allowed_tools
 
 
 def test_logistics_agent_runs_bounded_plan_in_order():
@@ -149,7 +153,7 @@ def test_after_sales_creates_pending_action_then_executes_after_confirmation():
     async def create_refund(params, context):
         nonlocal create_calls
         create_calls += 1
-        return {"refund_id": "REF-1", **params}
+        return {"created": True, "refund_id": "REF-1", **params}
 
     register_tool(registry, "query_order", query_order)
     register_tool(
@@ -187,6 +191,160 @@ def test_after_sales_creates_pending_action_then_executes_after_confirmation():
     assert create_calls == 1
 
 
+@pytest.mark.parametrize(
+    "intent",
+    ["return_request", "cancel_order", "request"],
+)
+def test_after_sales_fails_closed_for_unimplemented_intents(intent):
+    registry = ToolRegistry()
+    calls = []
+
+    async def query_order(params, context):
+        calls.append(("query_order", params))
+        return {"found": True, "order_id": params["order_id"]}
+
+    async def check_eligibility(params, context):
+        calls.append(("check_refund_eligibility", params))
+        return {"eligible": True, "order_id": params["order_id"]}
+
+    register_tool(registry, "query_order", query_order)
+    register_tool(registry, "check_refund_eligibility", check_eligibility)
+    result = run(AfterSalesAgent(registry).execute(DialogueState(
+        active_intent=intent,
+        slots={"order_id": "ORD-1"} if "request" in intent or intent == "cancel_order" else {},
+    )))
+
+    assert result.success
+    assert result.completed is False
+    assert "尚未实现" in result.response
+    assert calls == []
+
+
+@pytest.mark.parametrize("intent", ["complaint", "escalation"])
+def test_after_sales_creates_handoff_ticket_after_confirmation(intent):
+    registry = ToolRegistry()
+    create_calls = []
+
+    async def create_ticket(params, context):
+        create_calls.append(dict(params))
+        return {
+            "created": True,
+            "ticket_id": "TKT-1001",
+            **params,
+        }
+
+    register_tool(
+        registry,
+        "create_ticket",
+        create_ticket,
+        required=("subject", "description", "action_id"),
+        tool_type=ToolType.WRITE,
+    )
+    agent = AfterSalesAgent(registry)
+    state = DialogueState(active_intent=intent)
+
+    pending = run(agent.execute(state, "用户要求转人工处理"))
+    assert pending.pending_action is not None
+    assert pending.pending_action.tool_name == "create_ticket"
+    assert create_calls == []
+
+    confirmed = state.model_copy(update={
+        "pending_action": pending.pending_action,
+        "confirmation_status": ConfirmationStatus.CONFIRMED,
+    })
+    completed = run(agent.execute(confirmed, "确认"))
+
+    assert completed.success
+    assert completed.completed
+    assert "TKT-1001" in completed.response
+    assert len(create_calls) == 1
+
+
+def test_order_agent_handles_business_not_found_without_none_status():
+    registry = ToolRegistry()
+
+    async def query_order(params, context):
+        return {
+            "found": False,
+            "order_id": params["order_id"],
+            "error": "order_not_found",
+        }
+
+    register_tool(registry, "query_order", query_order)
+    result = run(OrderAgent(registry).execute(DialogueState(
+        active_intent="order_query",
+        slots={"order_id": "ORD-MISSING"},
+        required_slots=["order_id"],
+    )))
+
+    assert result.success
+    assert "没有找到" in result.response
+    assert "None" not in result.response
+
+
+def test_logistics_agent_handles_missing_tracking_without_none_status():
+    registry = ToolRegistry()
+
+    async def query_order(params, context):
+        return {"found": True, "order_id": params["order_id"], "status": "paid"}
+
+    async def track_package(params, context):
+        return {
+            "found": False,
+            "order_id": params["order_id"],
+            "error": "tracking_not_available",
+        }
+
+    register_tool(registry, "query_order", query_order)
+    register_tool(registry, "track_package", track_package)
+    result = run(LogisticsAgent(registry).execute(DialogueState(
+        active_intent="logistics_query",
+        slots={"order_id": "ORD-1"},
+        required_slots=["order_id"],
+    )))
+
+    assert result.success
+    assert "暂无物流" in result.response
+    assert "None" not in result.response
+
+
+def test_after_sales_handles_rejected_refund_creation_as_business_result():
+    registry = ToolRegistry()
+
+    async def create_refund(params, context):
+        return {
+            "created": False,
+            "order_id": params["order_id"],
+            "action_id": params["action_id"],
+            "error": "outside_refund_window",
+        }
+
+    register_tool(
+        registry,
+        "create_refund",
+        create_refund,
+        required=("order_id", "action_id"),
+        tool_type=ToolType.WRITE,
+    )
+    agent = AfterSalesAgent(registry)
+    pending = PendingAction(
+        tool_name="create_refund",
+        arguments={"order_id": "ORD-1"},
+    )
+    state = DialogueState(
+        active_intent="refund_request",
+        slots={"order_id": "ORD-1"},
+        pending_action=pending,
+        confirmation_status=ConfirmationStatus.CONFIRMED,
+    )
+
+    result = run(agent.execute(state))
+
+    assert result.success
+    assert "未能提交" in result.response
+    assert "None" not in result.response
+
+
 def test_knowledge_agent_calls_rag_once_and_returns_citation():
     registry = ToolRegistry()
     calls = 0
@@ -213,6 +371,71 @@ def test_knowledge_agent_calls_rag_once_and_returns_citation():
     assert result.success
     assert result.response.endswith("[1]")
     assert result.citations[0]["source"] == "policy.md"
+
+
+def test_knowledge_agent_uses_skill_and_memory_context_in_retrieval_query():
+    registry = ToolRegistry()
+    queries = []
+
+    async def rag_search(params, context):
+        queries.append(params["query"])
+        return {
+            "answered": True,
+            "hits": [{"chunk": {"content": "上下文相关答案"}}],
+            "citations": [{"citation_id": "[1]", "source": "policy.md"}],
+        }
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    context = (
+        "[Skills]\n退款需要先核验订单。\n\n"
+        "[会话摘要]\n用户此前询问退款到账。\n\n"
+        "[相关历史]\n- 上次退款使用原支付渠道。\n\n"
+        "[用户画像]\n{\"language\":\"zh\"}"
+    )
+    result = run(KnowledgeAgent(registry).execute(
+        DialogueState(active_intent="refund_policy"),
+        "这个要多久",
+        context,
+    ))
+
+    assert result.success
+    assert len(queries) == 1
+    assert "这个要多久" in queries[0]
+    assert "退款需要先核验订单" in queries[0]
+    assert "用户此前询问退款到账" in queries[0]
+    assert "上次退款使用原支付渠道" in queries[0]
+    assert "language" in queries[0]
+
+
+@pytest.mark.parametrize(
+    ("intent", "expected_text"),
+    [
+        ("greeting", "你好"),
+        ("feedback", "感谢"),
+        ("other", "订单、物流"),
+    ],
+)
+def test_knowledge_agent_uses_deterministic_responses_without_rag(
+    intent,
+    expected_text,
+):
+    registry = ToolRegistry()
+    calls = 0
+
+    async def rag_search(params, context):
+        nonlocal calls
+        calls += 1
+        return {"answered": True, "hits": [{"content": "不应返回"}]}
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    result = run(KnowledgeAgent(registry).execute(
+        DialogueState(active_intent=intent),
+        "测试消息",
+    ))
+
+    assert result.success
+    assert expected_text in result.response
+    assert calls == 0
 
 
 def test_tool_registry_rejects_domain_agent_overreach():
@@ -252,6 +475,11 @@ def test_runtime_executes_composite_tasks_sequentially():
             events.append(self.name)
             return type("Result", (), {
                 "response": self.name,
+                "success": True,
+                "completed": True,
+                "observations": [],
+                "pending_action": None,
+                "citations": [],
             })()
 
     runtime = DomainAgentRuntime(
@@ -269,6 +497,49 @@ def test_runtime_executes_composite_tasks_sequentially():
 
     assert events == [ORDER_AGENT, LOGISTICS_AGENT]
     assert response == "order\n\nlogistics"
+
+
+def test_runtime_evaluates_completion_condition_for_each_goal():
+    registry = ToolRegistry()
+
+    async def query_order(params, context):
+        return {
+            "found": True,
+            "order_id": params["order_id"],
+            "status": "paid",
+        }
+
+    async def track_package(params, context):
+        return {
+            "found": True,
+            "order_id": params["order_id"],
+            "status": "in_transit",
+        }
+
+    register_tool(registry, "query_order", query_order)
+    register_tool(registry, "track_package", track_package)
+    runtime = DomainAgentRuntime(
+        Router(),
+        {
+            ORDER_AGENT: OrderAgent(registry),
+            LOGISTICS_AGENT: LogisticsAgent(registry),
+        },
+    )
+
+    _, results = run(runtime.execute(
+        DialogueState(
+            active_intent="order_query",
+            slots={"order_id": "ORD-1"},
+        ),
+        "查订单和物流",
+        ["order_query", "logistics_query"],
+    ))
+
+    assert [result.goal for result in results] == [
+        "order_query",
+        "logistics_query",
+    ]
+    assert all(result.completed for result in results)
 
 
 def test_skill_loader_maps_legacy_agents_and_reads_new_metadata():

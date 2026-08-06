@@ -1,12 +1,12 @@
 """State-driven customer-service runtime used by the /chat endpoint."""
 import time
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from agents.domain_agents import (
     KNOWLEDGE_AGENT,
-    AgentResult,
     DomainAgentRuntime,
     Router,
 )
@@ -15,6 +15,7 @@ from core.agent_models import (
     ExecutionState,
     Transition,
     TurnContext,
+    UserAct,
 )
 from core.dialogue_state_tracker import DialogueStateTracker
 from core.trace_store import TraceStore, summarize_observations
@@ -35,6 +36,26 @@ class CustomerTurnResult:
     citations: List[Dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass
+class RuntimeAgentStats:
+    total: int = 0
+    success: int = 0
+    total_latency_ms: float = 0.0
+
+    def record(self, success: bool, latency_ms: float) -> None:
+        self.total += 1
+        self.success += int(success)
+        self.total_latency_ms += latency_ms
+
+    @property
+    def success_rate(self) -> float:
+        return self.success / self.total if self.total else 1.0
+
+    @property
+    def avg_ms(self) -> float:
+        return self.total_latency_ms / self.total if self.total else 0.0
+
+
 class CustomerAgentRuntime:
     """Coordinate NLU, DST, TurnEngine and the domain-agent runtime."""
 
@@ -53,6 +74,9 @@ class CustomerAgentRuntime:
         self._domain_runtime = domain_runtime
         self._router = router
         self._trace_store = trace_store
+        self._stats: Dict[str, RuntimeAgentStats] = defaultdict(
+            RuntimeAgentStats,
+        )
 
     async def run(
         self,
@@ -75,16 +99,26 @@ class CustomerAgentRuntime:
             previous.dialogue_state,
             understanding,
         )
+        execution_state = self._entry_state(engine, dialogue_state)
         execution = TurnContext(
             user_id=user_id,
             conv_id=conv_id,
             dialogue_state=dialogue_state,
-            execution_state=ExecutionState.UNDERSTANDING,
+            execution_state=execution_state,
+            state_history=[execution_state],
         )
+        execution_intents = list(understanding.intents)
+        if (
+            dialogue_state.active_intent
+            and understanding.user_act != UserAct.SWITCH
+            and understanding.primary_intent != dialogue_state.active_intent
+        ):
+            execution_intents = [dialogue_state.active_intent]
         turn_data: Dict[str, Any] = {
             "message": message,
             "agent_context": agent_context,
             "agent": self._router.route(dialogue_state),
+            "intents": execution_intents,
             "results": [],
             "citations": [],
         }
@@ -132,6 +166,10 @@ class CustomerAgentRuntime:
             "latency_ms": (time.monotonic() - started) * 1000,
         })
 
+        latency_ms = (time.monotonic() - started) * 1000
+        for result in turn_data["results"]:
+            self._stats[result.agent].record(result.success, latency_ms)
+
         return CustomerTurnResult(
             trace_id=trace_id,
             response=completed.response or "抱歉，当前没有得到可用的处理结果。",
@@ -139,7 +177,7 @@ class CustomerAgentRuntime:
             agent_type=turn_data["agent"],
             status=self._status(completed.execution_state),
             escalated=completed.execution_state == ExecutionState.FAILED,
-            latency_ms=(time.monotonic() - started) * 1000,
+            latency_ms=latency_ms,
             knowledge_used=any(
                 observation.name == "rag_search"
                 for observation in completed.observations
@@ -147,6 +185,18 @@ class CustomerAgentRuntime:
             missing_slots=list(completed.dialogue_state.missing_slots),
             citations=list(turn_data["citations"]),
         )
+
+    def get_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Return main-runtime Agent statistics for monitoring."""
+        return {
+            agent: {
+                "total": stats.total,
+                "success_rate": round(stats.success_rate, 3),
+                "avg_ms": round(stats.avg_ms, 1),
+                "routing_score": round(stats.success_rate, 3),
+            }
+            for agent, stats in self._stats.items()
+        }
 
     def _register_handlers(
         self,
@@ -171,49 +221,84 @@ class CustomerAgentRuntime:
                 context.dialogue_state.confirmation_status
                 == ConfirmationStatus.REJECTED
             ):
+                intent = context.dialogue_state.active_intent
+                response = (
+                    "已取消本次退款申请，不会执行退款操作。"
+                    if intent == "refund_request"
+                    else "已取消创建人工客服工单。"
+                )
                 return Transition(
                     next_state=ExecutionState.RESPONDING,
-                    response="已取消本次退款申请，不会执行退款操作。",
+                    response=response,
                     dialogue_updates={
                         "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
                     },
                     reason="pending_action_rejected",
                 )
-            target = self._router.route(context.dialogue_state)
-            turn_data["agent"] = target
+            targets = self._router.route_tasks(
+                context.dialogue_state,
+                turn_data["intents"],
+            )
+            turn_data["agent"] = ",".join(targets)
             return Transition(
                 next_state=(
                     ExecutionState.RETRIEVING
-                    if target == KNOWLEDGE_AGENT
+                    if targets and all(
+                        target == KNOWLEDGE_AGENT for target in targets
+                    )
                     else ExecutionState.ACTING
                 ),
-                dialogue_updates={"last_agent": target},
-                reason=f"routed_to:{target}",
+                dialogue_updates={
+                    "last_agent": targets[-1] if targets else None,
+                },
+                reason=f"routed_to:{','.join(targets)}",
             )
 
         async def execute_agent(context: TurnContext) -> Transition:
-            _, results = await self._domain_runtime.execute(
+            response, results = await self._domain_runtime.execute(
                 context.dialogue_state,
                 turn_data["message"],
+                intents=turn_data["intents"],
                 context=turn_data["agent_context"],
             )
             turn_data["results"].extend(results)
-            result: AgentResult = results[-1]
-            turn_data["citations"] = result.citations
-            if not result.success:
+            observations = [
+                observation
+                for result in results
+                for observation in result.observations
+            ]
+            citations = [
+                citation
+                for result in results
+                for citation in result.citations
+            ]
+            turn_data["citations"] = citations
+            failed = next(
+                (result for result in results if not result.success),
+                None,
+            )
+            if failed is not None:
                 return Transition(
                     next_state=ExecutionState.FAILED,
-                    observations=result.observations,
-                    response=result.response,
-                    reason=result.error or "agent_failed",
+                    observations=observations,
+                    response=response,
+                    reason=failed.error or "agent_failed",
                 )
-            if result.pending_action is not None:
+            pending = next(
+                (
+                    result.pending_action
+                    for result in results
+                    if result.pending_action is not None
+                ),
+                None,
+            )
+            if pending is not None:
                 return Transition(
                     next_state=ExecutionState.AWAITING_CONFIRMATION,
-                    observations=result.observations,
-                    response=result.response,
+                    observations=observations,
+                    response=response,
                     dialogue_updates={
-                        "pending_action": result.pending_action,
+                        "pending_action": pending,
                         "confirmation_status": ConfirmationStatus.PENDING,
                     },
                     reason="write_confirmation_required",
@@ -222,16 +307,21 @@ class CustomerAgentRuntime:
                 "pending_action": None,
                 "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
             }
-            if result.completed:
-                goals = list(context.dialogue_state.completed_goals)
-                goal = context.dialogue_state.active_intent
-                if goal and goal not in goals:
-                    goals.append(goal)
-                updates["completed_goals"] = goals
+            goals = list(context.dialogue_state.completed_goals)
+            for result in results:
+                if not result.completed:
+                    continue
+                result_goals = result.goals or (
+                    [result.goal] if result.goal else []
+                )
+                for goal in result_goals:
+                    if goal not in goals:
+                        goals.append(goal)
+            updates["completed_goals"] = goals
             return Transition(
                 next_state=ExecutionState.RESPONDING,
-                observations=result.observations,
-                response=result.response,
+                observations=observations,
+                response=response,
                 dialogue_updates=updates,
                 reason="agent_completed",
             )
@@ -248,6 +338,21 @@ class CustomerAgentRuntime:
         engine.register(ExecutionState.RETRIEVING, execute_agent)
         engine.register(ExecutionState.ACTING, execute_agent)
         engine.register(ExecutionState.RESPONDING, responding)
+
+    @staticmethod
+    def _entry_state(
+        engine: TurnEngine,
+        dialogue_state,
+    ) -> ExecutionState:
+        """Map persisted business state to an executable state for this turn."""
+        resumed = engine.resume_state(dialogue_state)
+        if resumed == ExecutionState.CLARIFYING:
+            return ExecutionState.UNDERSTANDING
+        if resumed == ExecutionState.AWAITING_CONFIRMATION:
+            return ExecutionState.ACTING
+        if resumed == ExecutionState.RESPONDING:
+            return ExecutionState.ROUTING
+        return resumed
 
     @staticmethod
     def _clarification(slot: str) -> str:

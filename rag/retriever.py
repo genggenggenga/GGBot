@@ -103,13 +103,22 @@ class HybridRetriever:
         *,
         reranker: Optional[Reranker] = None,
         rrf_k: int = 60,
-        relevance_threshold: float = 0.0,
+        relevance_threshold: Optional[float] = None,
+        dense_threshold: float = 0.2,
+        rrf_threshold: float = 0.01,
+        rerank_threshold: float = 0.1,
     ) -> None:
         self._dense = dense_index
         self._sparse = sparse_index
         self._reranker = reranker
         self._rrf_k = rrf_k
-        self._threshold = relevance_threshold
+        if relevance_threshold is not None:
+            dense_threshold = rrf_threshold = rerank_threshold = (
+                relevance_threshold
+            )
+        self._dense_threshold = dense_threshold
+        self._rrf_threshold = rrf_threshold
+        self._rerank_threshold = rerank_threshold
 
     def add(self, chunks: Sequence[DocumentChunk]) -> None:
         self._dense.add(chunks)
@@ -133,7 +142,8 @@ class HybridRetriever:
         else:
             candidates = dense_hits
 
-        if use_reranker and self._reranker and candidates:
+        reranked = bool(use_reranker and self._reranker and candidates)
+        if reranked:
             scores = self._reranker.score(
                 query, [hit.chunk for hit in candidates]
             )
@@ -143,7 +153,12 @@ class HybridRetriever:
             candidates.sort(key=lambda hit: hit.score, reverse=True)
 
         selected = candidates[:top_k]
-        if not selected or selected[0].score < self._threshold:
+        threshold = (
+            self._rerank_threshold
+            if reranked
+            else self._rrf_threshold if use_sparse else self._dense_threshold
+        )
+        if not selected or selected[0].score < threshold:
             return RetrievalResult(
                 query=query,
                 answered=False,

@@ -118,6 +118,7 @@ class TestRunLocalEval:
         assert len(report.per_case) == 50
         assert "intent_accuracy" in report.summary
         assert "intent_macro_f1" in report.summary
+        assert "user_act_accuracy" in report.summary
         assert "slot_f1" in report.summary
         assert "dst_joint_goal_accuracy" in report.summary
         assert "recall_at_5" in report.summary
@@ -127,6 +128,8 @@ class TestRunLocalEval:
         assert "task_completion_rate" in report.summary
         assert "citation_precision" in report.summary
         assert "faithfulness_rate" in report.summary
+        assert report.summary["citation_precision"] > 0
+        assert report.summary["faithfulness_rate"] > 0
 
     @pytest.mark.asyncio
     async def test_each_input_case_runs_once_in_source_order(self, seed_chunks):
@@ -151,6 +154,30 @@ class TestRunLocalEval:
     async def test_slot_f1_perfect(self, seed_chunks):
         report = await run_local_eval(seed_chunks=seed_chunks)
         assert report.summary["slot_f1"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_runtime_cases_use_real_tool_observations_and_failure_status(
+        self,
+        seed_chunks,
+    ):
+        report = await run_local_eval(seed_chunks=seed_chunks)
+        by_id = {case["case_id"]: case for case in report.per_case}
+
+        assert by_id["TOOL-006"]["observed_tools"][-1] == "create_refund"
+        assert by_id["E2E-009"]["predicted_status"] == "failed"
+        assert by_id["E2E-009"]["completed"] is True
+        assert by_id["NLU-008"]["predicted_act"] == "reject"
+
+    def test_dst_ground_truth_is_explicit_in_fixture(self):
+        cases = json.loads(
+            pathlib.Path("data/eval/customer_agent_cases.json").read_text(
+                encoding="utf-8",
+            )
+        )
+        dst_cases = [case for case in cases if case["id"].startswith("DST-")]
+
+        assert dst_cases
+        assert all("expected_slots" in case for case in dst_cases)
 
 
 class TestAblation:
@@ -196,7 +223,9 @@ class TestAblation:
         monkeypatch.setattr(HybridRetriever, "search", search_spy)
         await run_local_eval(rag_mode=mode, seed_chunks=seed_chunks)
 
-        assert len(calls) == 10
+        # Ten dedicated RAG cases plus runtime Tool/E2E cases that actually
+        # route through KnowledgeAgent.
+        assert len(calls) >= 10
         assert set(calls) == {expected_flags}
 
 

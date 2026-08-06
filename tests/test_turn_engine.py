@@ -74,6 +74,21 @@ def test_illegal_transition_is_rejected_before_context_changes():
 
 
 @pytest.mark.asyncio
+async def test_handler_illegal_transition_becomes_structured_failure():
+    engine = TurnEngine(InMemoryStateStore())
+    engine.register(
+        ExecutionState.UNDERSTANDING,
+        lambda _: transition(ExecutionState.COMPLETED),
+    )
+
+    result = await engine.run(TurnContext(user_id="u1", conv_id="c1"))
+
+    assert result.execution_state == ExecutionState.FAILED
+    assert result.handoff is not None
+    assert result.handoff.reason == "invalid_transition"
+
+
+@pytest.mark.asyncio
 async def test_clarifying_pauses_and_can_be_restored_next_turn():
     store = InMemoryStateStore()
     engine = TurnEngine(store)

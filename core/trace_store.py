@@ -22,6 +22,52 @@ _FORBIDDEN_KEYS = frozenset({
     "hidden_reasoning", "reasoning", "reasoning_chain", "chain_of_thought",
     "raw_llm_output",
 })
+_EVENT_ALLOWED_KEYS = frozenset({
+    "event",
+    "timestamp",
+    "agent",
+    "success",
+    "latency_ms",
+    "result_summary",
+    "observation_summaries",
+    "intent",
+    "slot_keys",
+    "user_act",
+    "state_version",
+    "tools",
+    "execution_state",
+    "state_path",
+    "status",
+})
+_PREVIEW_ALLOWED_KEYS = frozenset({
+    "answered",
+    "bm25_score",
+    "cached",
+    "chunk",
+    "chunk_id",
+    "citations",
+    "created",
+    "current_status",
+    "dense_score",
+    "eligible",
+    "found",
+    "hits",
+    "idempotent_replay",
+    "items",
+    "metadata",
+    "page",
+    "reason",
+    "rerank_score",
+    "results",
+    "rrf_score",
+    "score",
+    "section",
+    "source",
+    "status",
+    "success",
+    "title",
+    "tool_name",
+})
 
 
 def _sanitize_value(value: Any) -> Any:
@@ -38,7 +84,7 @@ def _sanitize_value(value: Any) -> Any:
 
 
 def _preview(value: Any) -> str:
-    sanitized = _sanitize_value(value)
+    sanitized = _sanitize_preview(value)
     try:
         rendered = json.dumps(
             sanitized,
@@ -51,6 +97,19 @@ def _preview(value: Any) -> str:
     if len(rendered) > _DATA_PREVIEW_LIMIT:
         return rendered[:_DATA_PREVIEW_LIMIT] + "..."
     return rendered
+
+
+def _sanitize_preview(value: Any) -> Any:
+    """Keep only explicitly public business-result metadata."""
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_preview(item)
+            for key, item in value.items()
+            if str(key).lower() in _PREVIEW_ALLOWED_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_preview(item) for item in value]
+    return value
 
 
 def summarize_observations(observations: Sequence[Any]) -> List[Dict[str, Any]]:
@@ -92,8 +151,12 @@ def summarize_observations(observations: Sequence[Any]) -> List[Dict[str, Any]]:
 
 
 def _scrub_event(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively remove forbidden keys from a trace event dict."""
-    return _sanitize_value(event)
+    """Apply a top-level allowlist, then recursively remove forbidden keys."""
+    return {
+        key: _sanitize_value(value)
+        for key, value in event.items()
+        if str(key).lower() in _EVENT_ALLOWED_KEYS
+    }
 
 
 class TraceEvent(BaseModel):

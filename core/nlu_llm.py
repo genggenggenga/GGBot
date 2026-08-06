@@ -21,6 +21,7 @@ _SYSTEM_PROMPT = """你是客服对话理解专家。根据用户消息和已有
 返回 JSON，格式：
 {{
   "intent": "<意图名>",
+  "intents": ["<按优先级排列的全部意图>"],
   "confidence": <0-1>,
   "slots": {{"order_id": "...", ...}},
   "user_act": "<inform|confirm|reject|switch|ask>",
@@ -33,7 +34,8 @@ _SYSTEM_PROMPT = """你是客服对话理解专家。根据用户消息和已有
 规则：
 1. 如果用户纠正了之前提供的值，把该槽位名放入 corrected_slots。
 2. 如果用户切换了目标意图，user_act 设为 switch。
-3. 仅输出 JSON，不要附加其他文字。"""
+3. 如果一句话包含多个独立目标，全部写入 intents，intent 为首要目标。
+4. 仅输出 JSON，不要附加其他文字。"""
 
 _FEW_SHOT = """
 示例:
@@ -117,10 +119,15 @@ def _validate_llm_output(data: Dict[str, Any]) -> Optional[UnderstandingResult]:
     if primary_intent != intent:
         confidence = min(confidence, 0.5)
 
-    # Build candidate intents list
-    intents = [primary_intent]
-    if primary_intent != intent and intent not in intents:
-        intents.append(intent)
+    raw_intents = data.get("intents", [])
+    intents = [
+        str(candidate)
+        for candidate in raw_intents
+        if str(candidate) in INTENT_SCHEMAS
+    ] if isinstance(raw_intents, list) else []
+    if primary_intent in intents:
+        intents.remove(primary_intent)
+    intents.insert(0, primary_intent)
 
     try:
         return UnderstandingResult(
@@ -137,9 +144,17 @@ def _validate_llm_output(data: Dict[str, Any]) -> Optional[UnderstandingResult]:
         return None
 
 
-def make_fallback_understanding(text: str) -> UnderstandingResult:
+def make_fallback_understanding(
+    text: str,
+    current_state: Optional[Dict[str, Any]] = None,
+) -> UnderstandingResult:
     """Produce a safe OTHER/clarify fallback when LLM output is unusable."""
-    ft = fast_track_extract(text)
+    ft = fast_track_extract(
+        text,
+        confirmation_pending=(
+            (current_state or {}).get("confirmation_status") == "pending"
+        ),
+    )
     slots = dict(ft.slots) if ft.hit else {}
     user_act = ft.user_act or UserAct.INFORM
     primary_intent = ft.intent if ft.intent and ft.intent in INTENT_SCHEMAS else "other"
@@ -155,6 +170,27 @@ def make_fallback_understanding(text: str) -> UnderstandingResult:
         route_to=INTENT_SCHEMAS[primary_intent].allowed_agents[0]
             if primary_intent in INTENT_SCHEMAS else None,
     )
+
+
+def _normalize_user_act(
+    result: UnderstandingResult,
+    current_state: Optional[Dict[str, Any]],
+) -> UnderstandingResult:
+    """Apply confirmation-state and correction precedence to LLM output."""
+    user_act = result.user_act
+    if result.corrected_slots and user_act in {
+        UserAct.CONFIRM,
+        UserAct.REJECT,
+    }:
+        user_act = UserAct.INFORM
+    elif (
+        user_act in {UserAct.CONFIRM, UserAct.REJECT}
+        and (current_state or {}).get("confirmation_status") != "pending"
+    ):
+        user_act = UserAct.INFORM
+    if user_act == result.user_act:
+        return result
+    return result.model_copy(update={"user_act": user_act})
 
 
 async def understand_with_llm(
@@ -180,20 +216,20 @@ async def understand_with_llm(
         raw = await llm_call_fn(prompt)
         if not isinstance(raw, str) or not raw.strip():
             logger.warning("LLM returned empty output, degrading")
-            return make_fallback_understanding(text)
+            return make_fallback_understanding(text, current_state)
 
         data = _parse_llm_json(raw)
         if data is None:
             logger.warning("LLM output is not valid JSON, degrading")
-            return make_fallback_understanding(text)
+            return make_fallback_understanding(text, current_state)
 
         result = _validate_llm_output(data)
         if result is None:
             logger.warning("LLM output failed validation, degrading")
-            return make_fallback_understanding(text)
+            return make_fallback_understanding(text, current_state)
 
-        return result
+        return _normalize_user_act(result, current_state)
 
     except Exception as ex:
         logger.warning(f"LLM structured call failed: {ex}, degrading")
-        return make_fallback_understanding(text)
+        return make_fallback_understanding(text, current_state)

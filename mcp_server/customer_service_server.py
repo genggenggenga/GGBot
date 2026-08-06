@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 from datetime import date
+import hashlib
+import json
 from typing import Any, Dict
 
 from mcp.server.fastmcp import FastMCP
@@ -21,7 +23,7 @@ _ORDERS: Dict[str, Dict[str, Any]] = {
         "currency": "CNY",
         "paid_at": "2026-07-30",
         "delivered_at": "2026-08-01",
-        "refundable_until": "2026-08-08",
+        "refundable_until": "2099-08-08",
     },
     "ORD-1002": {
         "order_id": "ORD-1002",
@@ -70,6 +72,23 @@ _LOGISTICS: Dict[str, Dict[str, Any]] = {
 
 _REFUNDS_BY_ACTION: Dict[str, Dict[str, Any]] = {}
 _TICKETS_BY_ACTION: Dict[str, Dict[str, Any]] = {}
+_REFUND_FINGERPRINTS: Dict[str, str] = {}
+_TICKET_FINGERPRINTS: Dict[str, str] = {}
+
+
+def _current_date() -> date:
+    """Return the business date; tests replace this clock deterministically."""
+    return date.today()
+
+
+def _payload_fingerprint(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _order_or_error(order_id: str) -> Dict[str, Any]:
@@ -105,9 +124,8 @@ def track_package(order_id: str) -> Dict[str, Any]:
 def check_refund_eligibility(
     order_id: str,
     reason: str = "user_requested",
-    as_of: str = "2026-08-02",
 ) -> Dict[str, Any]:
-    """Check whether the mock order can be refunded as of an ISO date."""
+    """Check whether the mock order can be refunded on the business date."""
     order = _order_or_error(order_id)
     if not order["found"]:
         return {
@@ -120,7 +138,7 @@ def check_refund_eligibility(
     eligible = (
         order["status"] == "delivered"
         and refundable_until is not None
-        and date.fromisoformat(as_of) <= date.fromisoformat(refundable_until)
+        and _current_date() <= date.fromisoformat(refundable_until)
     )
     return {
         "eligible": eligible,
@@ -138,8 +156,18 @@ def create_refund(
     reason: str = "user_requested",
 ) -> Dict[str, Any]:
     """Create an idempotent mock refund keyed by action_id."""
+    fingerprint = _payload_fingerprint({
+        "order_id": order_id,
+        "reason": reason,
+    })
     existing = _REFUNDS_BY_ACTION.get(action_id)
     if existing is not None:
+        if _REFUND_FINGERPRINTS.get(action_id) != fingerprint:
+            return {
+                "created": False,
+                "action_id": action_id,
+                "error": "idempotency_conflict",
+            }
         return {**deepcopy(existing), "idempotent_replay": True}
 
     eligibility = check_refund_eligibility(order_id=order_id, reason=reason)
@@ -161,6 +189,7 @@ def create_refund(
         "idempotent_replay": False,
     }
     _REFUNDS_BY_ACTION[action_id] = refund
+    _REFUND_FINGERPRINTS[action_id] = fingerprint
     return deepcopy(refund)
 
 
@@ -172,8 +201,19 @@ def create_ticket(
     order_id: str | None = None,
 ) -> Dict[str, Any]:
     """Create an idempotent mock handoff ticket keyed by action_id."""
+    fingerprint = _payload_fingerprint({
+        "subject": subject,
+        "description": description,
+        "order_id": order_id,
+    })
     existing = _TICKETS_BY_ACTION.get(action_id)
     if existing is not None:
+        if _TICKET_FINGERPRINTS.get(action_id) != fingerprint:
+            return {
+                "created": False,
+                "action_id": action_id,
+                "error": "idempotency_conflict",
+            }
         return {**deepcopy(existing), "idempotent_replay": True}
 
     ticket = {
@@ -187,6 +227,7 @@ def create_ticket(
         "idempotent_replay": False,
     }
     _TICKETS_BY_ACTION[action_id] = ticket
+    _TICKET_FINGERPRINTS[action_id] = fingerprint
     return deepcopy(ticket)
 
 

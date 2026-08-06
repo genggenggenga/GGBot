@@ -189,6 +189,17 @@ def test_write_tool_requires_explicit_confirmation():
     assert confirmed.success
     assert confirmed.data == {"refund_id": "R-1"}
     assert called == 1
+    assert registry.is_action_confirmed("A-1") is False
+
+    replay_without_confirmation = run(
+        registry.call(
+            "after_sales",
+            "create_refund",
+            {"order_id": "O-1"},
+            action_id="A-1",
+        )
+    )
+    assert not replay_without_confirmation.success
 
 
 def test_tool_result_can_convert_to_observation():

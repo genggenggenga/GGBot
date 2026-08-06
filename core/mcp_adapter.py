@@ -10,7 +10,14 @@ from typing import Any, Dict, List, Optional
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from core.tool_registry import ToolResult, ToolSpec, ToolType, validate_params
+from core.tool_registry import (
+    CircuitBreaker,
+    ToolResult,
+    ToolSpec,
+    ToolStats,
+    ToolType,
+    validate_params,
+)
 
 
 class MCPClient:
@@ -93,6 +100,8 @@ class MCPToolAdapter:
     def __init__(self, client: MCPClient, spec: ToolSpec) -> None:
         self._client = client
         self.spec = spec
+        self.stats = ToolStats()
+        self.breaker = CircuitBreaker()
 
     async def call(
         self,
@@ -103,19 +112,36 @@ class MCPToolAdapter:
     ) -> ToolResult:
         del context, use_cache
         started = time.monotonic()
+        self.stats.total += 1
+        if not self.breaker.allow():
+            self.stats.failed += 1
+            self.stats.consecutive_fails += 1
+            return ToolResult(
+                success=False,
+                tool_name=self.spec.name,
+                error=f"tool circuit open: {self.spec.name}",
+            )
         try:
             validate_params(self.spec, params)
             data = await asyncio.wait_for(
                 self._client.call_tool(self.spec.name, params),
                 timeout=self.spec.timeout_s,
             )
+            latency_ms = (time.monotonic() - started) * 1000
+            self.stats.success += 1
+            self.stats.consecutive_fails = 0
+            self.stats.total_latency_ms += latency_ms
+            self.breaker.record_success()
             return ToolResult(
                 success=True,
                 data=data,
                 tool_name=self.spec.name,
-                latency_ms=round((time.monotonic() - started) * 1000, 2),
+                latency_ms=round(latency_ms, 2),
             )
         except asyncio.TimeoutError:
+            self.stats.failed += 1
+            self.stats.consecutive_fails += 1
+            self.breaker.record_failure()
             return ToolResult(
                 success=False,
                 tool_name=self.spec.name,
@@ -123,6 +149,9 @@ class MCPToolAdapter:
                 latency_ms=round((time.monotonic() - started) * 1000, 2),
             )
         except Exception as ex:
+            self.stats.failed += 1
+            self.stats.consecutive_fails += 1
+            self.breaker.record_failure()
             return ToolResult(
                 success=False,
                 tool_name=self.spec.name,

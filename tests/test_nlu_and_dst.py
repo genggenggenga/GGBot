@@ -18,6 +18,7 @@ from core.nlu_fast_track import (
     FastTrackResult,
     build_understanding_from_fast_track,
     detect_intent_from_keywords,
+    detect_intents_from_keywords,
     detect_user_act,
     extract_order_id,
     extract_tracking_no,
@@ -80,22 +81,27 @@ class TestExtractTrackingNo:
 
 class TestDetectUserAct:
     def test_confirm(self):
-        assert detect_user_act("确认") == UserAct.CONFIRM
-        assert detect_user_act("是的") == UserAct.CONFIRM
-        assert detect_user_act("好的") == UserAct.CONFIRM
-        assert detect_user_act("yes") == UserAct.CONFIRM
+        assert detect_user_act("确认", confirmation_pending=True) == UserAct.CONFIRM
+        assert detect_user_act("是的", confirmation_pending=True) == UserAct.CONFIRM
+        assert detect_user_act("好的", confirmation_pending=True) == UserAct.CONFIRM
+        assert detect_user_act("yes", confirmation_pending=True) == UserAct.CONFIRM
 
     def test_reject(self):
-        assert detect_user_act("取消") == UserAct.REJECT
-        assert detect_user_act("不要") == UserAct.REJECT
-        assert detect_user_act("no") == UserAct.REJECT
+        assert detect_user_act("取消", confirmation_pending=True) == UserAct.REJECT
+        assert detect_user_act("不要", confirmation_pending=True) == UserAct.REJECT
+        assert detect_user_act("no", confirmation_pending=True) == UserAct.REJECT
+        assert detect_user_act("不办了", confirmation_pending=True) == UserAct.REJECT
 
     @pytest.mark.parametrize("text", ["不可以", "不行", "不要确认", "不能提交"])
     def test_negative_confirmation_is_rejected(self, text):
-        assert detect_user_act(text) == UserAct.REJECT
+        assert detect_user_act(text, confirmation_pending=True) == UserAct.REJECT
 
     def test_explicit_goal_switch(self):
         assert detect_user_act("算了不退了，我想查物流") == UserAct.SWITCH
+
+    def test_confirmation_words_are_ignored_without_pending_action(self):
+        assert detect_user_act("确认", confirmation_pending=False) is None
+        assert detect_user_act("不办了", confirmation_pending=False) is None
 
     def test_neither(self):
         assert detect_user_act("我要退款") is None
@@ -108,8 +114,21 @@ class TestDetectIntentFromKeywords:
     def test_logistics(self):
         assert detect_intent_from_keywords("查物流") == "logistics_query"
 
+    def test_delivery_policy_is_a_knowledge_query(self):
+        assert detect_intent_from_keywords("配送一般几天") == "query"
+        assert detect_intents_from_keywords("配送一般几天") == ["query"]
+
     def test_no_match(self):
         assert detect_intent_from_keywords("你好") is None
+
+    def test_compound_order_and_logistics_intents(self):
+        intents = detect_intents_from_keywords("查 ORD-1002 的订单和物流")
+
+        assert intents == ["logistics_query", "order_query"]
+
+    def test_handoff_intents_have_deterministic_routes(self):
+        assert detect_intent_from_keywords("我要投诉") == "complaint"
+        assert detect_intent_from_keywords("转人工客服") == "escalation"
 
 
 class TestFastTrackExtract:
@@ -126,13 +145,31 @@ class TestFastTrackExtract:
         assert ft.intent == "logistics_query"
 
     def test_confirm_word(self):
-        ft = fast_track_extract("确认")
+        ft = fast_track_extract("确认", confirmation_pending=True)
         assert ft.user_act == UserAct.CONFIRM
         assert ft.hit is True
+
+    def test_slot_correction_is_not_treated_as_rejection(self):
+        ft = fast_track_extract(
+            "不对，订单号是 ORD-1002",
+            confirmation_pending=True,
+        )
+        assert ft.corrected_slots == ["order_id"]
+        assert ft.user_act == UserAct.INFORM
 
     def test_no_hit(self):
         ft = fast_track_extract("你好")
         assert ft.hit is False
+
+    def test_compound_fast_track_keeps_all_intents(self):
+        ft = fast_track_extract("查 ORD-1002 的订单和物流")
+        result = build_understanding_from_fast_track(
+            ft,
+            "查 ORD-1002 的订单和物流",
+        )
+
+        assert result.intents == ["logistics_query", "order_query"]
+        assert result.primary_intent == "logistics_query"
 
 
 class TestBuildUnderstandingFromFastTrack:
@@ -174,7 +211,10 @@ class TestStructuredRecognizerFastTrack:
         recognizer = IntentRecognizer.__new__(IntentRecognizer)
         result = await recognizer.recognize_structured(
             "确认",
-            current_state={"active_intent": "refund_request"},
+            current_state={
+                "active_intent": "refund_request",
+                "confirmation_status": "pending",
+            },
         )
         assert result.primary_intent == "refund_request"
         assert result.user_act == UserAct.CONFIRM
@@ -188,6 +228,7 @@ class TestStructuredRecognizerFastTrack:
         )
         assert result.primary_intent == "refund_request"
         assert result.corrected_slots == ["order_id"]
+        assert result.user_act == UserAct.INFORM
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -244,6 +285,16 @@ class TestValidateLlmOutput:
     def test_missing_intent(self):
         data = {"confidence": 0.8, "slots": {}}
         assert _validate_llm_output(data) is None
+
+    def test_valid_output_keeps_multiple_intents(self):
+        result = _validate_llm_output({
+            "intent": "order_query",
+            "intents": ["order_query", "logistics_query", "order_query"],
+            "confidence": 0.9,
+            "slots": {"order_id": "ORD-1001"},
+        })
+
+        assert result.intents == ["order_query", "logistics_query"]
 
 
 class TestMakeFallbackUnderstanding:
@@ -319,6 +370,52 @@ class TestUnderstandWithLlm:
         result = await understand_with_llm("不对，订单号是 ORD-1002", mock_llm)
         assert "order_id" in result.corrected_slots
         assert result.extracted_slots["order_id"] == "ORD-1002"
+
+    @pytest.mark.asyncio
+    async def test_llm_confirmation_requires_pending_action(self):
+        async def mock_llm(prompt: str) -> str:
+            return json.dumps({
+                "intent": "other",
+                "confidence": 0.9,
+                "slots": {},
+                "user_act": "confirm",
+                "corrected_slots": [],
+            })
+
+        without_pending = await understand_with_llm("确认", mock_llm)
+        with_pending = await understand_with_llm(
+            "确认",
+            mock_llm,
+            {
+                "active_intent": "refund_request",
+                "confirmation_status": "pending",
+            },
+        )
+
+        assert without_pending.user_act == UserAct.INFORM
+        assert with_pending.user_act == UserAct.CONFIRM
+
+    @pytest.mark.asyncio
+    async def test_llm_correction_takes_priority_over_rejection(self):
+        async def mock_llm(prompt: str) -> str:
+            return json.dumps({
+                "intent": "refund_request",
+                "confidence": 0.9,
+                "slots": {"order_id": "ORD-1002"},
+                "user_act": "reject",
+                "corrected_slots": ["order_id"],
+            })
+
+        result = await understand_with_llm(
+            "不对，订单号是 ORD-1002",
+            mock_llm,
+            {
+                "active_intent": "refund_request",
+                "confirmation_status": "pending",
+            },
+        )
+
+        assert result.user_act == UserAct.INFORM
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

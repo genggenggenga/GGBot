@@ -9,8 +9,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from rag.indexes import (
     BM25Index,
     ChromaDenseIndex,
-    build_bge_embedding_function,
-    build_siliconflow_embedding_function,
 )
 from rag.loaders import chunk_sections, load_document
 from rag.models import DocumentChunk, LoadedSection
@@ -49,7 +47,10 @@ class KnowledgeRuntime:
         enable_local_models: bool = True,
         embedding_model: str = "BAAI/bge-small-zh-v1.5",
         reranker_model: str = "BAAI/bge-reranker-v2-m3",
-        relevance_threshold: float = 0.0,
+        relevance_threshold: Optional[float] = None,
+        dense_threshold: float = 0.2,
+        rrf_threshold: float = 0.01,
+        rerank_threshold: float = 0.1,
         embedding_provider: Optional[str] = None,
     ) -> "KnowledgeRuntime":
         """Assemble the runtime.
@@ -70,25 +71,17 @@ class KnowledgeRuntime:
 
         chunks = _collection_chunks(knowledge_base._collection)
         if provider == "api":
-            embedding_function = build_siliconflow_embedding_function(embedding_model)
             dense_index = ChromaDenseIndex(
-                client=knowledge_base._client,
-                collection_name="knowledge_dense_bge",
-                embedding_function=embedding_function,
+                collection=knowledge_base._collection,
             )
             reranker: Optional[Reranker] = SiliconFlowReranker(reranker_model)
-            dense_index.add(chunks)
-            write_dense = True
+            write_dense = False
         elif provider == "local":
-            embedding_function = build_bge_embedding_function(embedding_model)
             dense_index = ChromaDenseIndex(
-                client=knowledge_base._client,
-                collection_name="knowledge_dense_bge",
-                embedding_function=embedding_function,
+                collection=knowledge_base._collection,
             )
             reranker = CrossEncoderReranker(reranker_model)
-            dense_index.add(chunks)
-            write_dense = True
+            write_dense = False
         else:  # "off"
             dense_index = ChromaDenseIndex(collection=knowledge_base._collection)
             reranker = None
@@ -101,6 +94,9 @@ class KnowledgeRuntime:
             sparse_index,
             reranker=reranker,
             relevance_threshold=relevance_threshold,
+            dense_threshold=dense_threshold,
+            rrf_threshold=rrf_threshold,
+            rerank_threshold=rerank_threshold,
         )
         return cls(
             knowledge_base,
@@ -143,15 +139,21 @@ class KnowledgeRuntime:
         if not chunks:
             return 0
 
-        self.knowledge_base.add_documents([
-            {
-                "title": section.title,
-                "content": section.text,
-                "source": section.source,
-                "section": section.section,
-            }
-            for section in loaded
-        ])
+        add_chunks = getattr(self.knowledge_base, "add_chunks", None)
+        if add_chunks is not None:
+            add_chunks(chunks)
+        else:
+            self.knowledge_base.add_documents([
+                {
+                    "title": section.title,
+                    "content": section.text,
+                    "source": section.source,
+                    "section": section.section,
+                    "page": section.page,
+                    "metadata": section.metadata,
+                }
+                for section in loaded
+            ])
         if self._write_dense_on_ingest:
             self.dense_index.add(chunks)
         self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})

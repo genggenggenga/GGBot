@@ -2,12 +2,12 @@
 
 > Turn-level Agent Runtime · Standard MCP · Hybrid RAG · Persistent Memory
 >
-> 本地版本与[飞书文档](https://bytedance.sg.larkoffice.com/docx/Ix4bdrw7Moqennx7kINloQdbgMc) revision 31 对齐。
+> 技术说明与[飞书文档](https://bytedance.sg.larkoffice.com/docx/Ix4bdrw7Moqennx7kINloQdbgMc) revision 52 对齐。
 
 | 项目     | 内容                      | 项目     | 内容                              |
 | -------- | ------------------------- | -------- | --------------------------------- |
-| 当前版本 | `feat-v1 / f901c50`       | 核心场景 | 退款申请三轮闭环                  |
-| 验证结果 | 238 tests passed · 12.64s | 技术主线 | 显式状态机 + 多 Agent + MCP + RAG |
+| 当前版本 | `feat-v1 / c80e5fb + P0 fixes` | 核心场景 | 退款申请三轮闭环                  |
+| 验证结果 | 277 tests passed · 6.17s       | 技术主线 | 显式状态机 + 多 Agent + MCP + RAG |
 
 > **项目定位**
 >
@@ -23,7 +23,7 @@
 | 工具协议    | 官方 MCP SDK、stdio Server、动态工具发现               | 可运行 Demo    |
 | 知识检索    | Chroma Dense + BM25 + RRF + Cross-Encoder              | 效果待继续验证 |
 | 记忆系统    | Redis 工作记忆与状态，Chroma 情景记忆与画像            | 分层存储       |
-| 质量体系    | Trace、Prometheus、238 个测试、50 条离线评测           | 监控仍有双链路 |
+| 质量体系    | Trace、Prometheus、277 个测试、50 条离线评测           | 主链路监控已接入 |
 
 ### 系统架构
 
@@ -31,7 +31,7 @@
 
 **主运行时。** `POST /chat` 已切换到 `CustomerAgentRuntime → DialogueStateTracker → TurnEngine → DomainAgentRuntime → ToolRegistry`。FAQ 使用固定 RAG 路径；订单、物流和退款使用有界 ServiceAgent；写操作在用户确认前不会执行。
 
-**兼容运行时。** 仓库仍保留早期 `AgentOrchestrator` 与 `MCPToolManager`，继续承载 legacy LLM Agent、`/search`、部分监控和旧评测。当前版本是“新主链路 + 旧兼容能力”并存，尚未完全收敛为单一运行时。
+**兼容运行时。** 仓库仍保留早期 `AgentOrchestrator` 与 `MCPToolManager` 供显式 legacy 评测使用，但 `/chat`、`/search`、默认评测、CLI 和在线监控均已迁移到 CustomerAgentRuntime / ToolRegistry。Legacy evaluator 默认不初始化，仅在 `ENABLE_LEGACY_EVAL=true` 时启用。
 
 ### 启动装配与模块边界
 
@@ -106,7 +106,7 @@ while state not in terminal_states:
 
 **第三轮恢复待执行动作。** 用户说“确认”时，NLU 识别 UserAct.CONFIRM，DST 把 confirmation_status 从 PENDING 更新为 CONFIRMED。TurnEngine 由 `resume_state()` 推导从 ACTING 恢复。AfterSalesAgent 使用原 PendingAction 的 action_id 调用 `confirm_action()`，随后 ToolRegistry 才放行 WRITE 工具。
 
-**幂等键贯穿状态与工具。** action_id 同时存在于 PendingAction、ToolRegistry 确认门禁和 MCP Server 写入缓存中。即使确认后的请求重试、进程恢复或 MCP 调用重放，Server 也会返回同一个退款结果，并设置 `idempotent_replay=true`，而不是再次创建退款。
+**幂等键贯穿状态与工具。** action_id 同时存在于 PendingAction、ToolRegistry 确认门禁和 MCP Server 写入缓存中。相同 action_id 只有 payload 指纹一致时才作为重放返回；payload 不同会返回 `idempotency_conflict`。当前幂等表仍为进程内 Mock，持久化需要真实数据库环境。
 
 **拒绝和失败都有显式语义。** 拒绝会清空 pending_action 并返回取消文案，不会触达写工具；订单不存在或超出退款窗口属于业务完成结果；工具超时、参数错误或 handler 异常才进入 FAILED，并生成可交给人工的 HandoffPackage。
 
@@ -254,25 +254,26 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **Trace 记录公开执行事实，不记录隐藏推理。** CustomerAgentRuntime 在 understanding、agent_result、rag_retrieval 和 turn_end 四类节点写入事件。事件包含意图、槽位名、Agent、工具名、成功状态、状态路径和延迟，但不保存用户原文、完整 Prompt、检索 query 或 Chain-of-Thought。
 
-**Observation 会先做摘要和递归脱敏。** `summarize_observations()` 最多保留 8 条 Observation，仅输出 source、name、success 和最多 120 字的数据预览。message、prompt、query、content、reasoning 等禁止字段会从任意层级递归移除；失败错误统一降级为 operation_failed，避免上游异常文本回显敏感输入。
+**Observation 会先做摘要和字段级 allowlist。** `summarize_observations()` 最多保留 8 条 Observation，仅输出 source、name、success，以及状态、结果标志和引用元数据。订单号、用户标识、金额、原文、Prompt 和隐藏推理默认不进入 Trace；失败错误统一降级为 operation_failed。
 
 **TraceStore 当前是有界内存实现。** 默认最多保存 1000 个 trace_id，超过后淘汰最早记录；`GET /traces/{trace_id}` 用于演示和调试。它验证了 Trace 数据模型与脱敏策略，但服务重启后会丢失，不属于生产级持久化追踪系统。
 
-**PerformanceMonitor 周期拉取运行统计。** 监控任务按 interval 读取旧版 Orchestrator 与 MCPToolManager 的成功率、平均延迟、连续失败数和熔断状态。滑动窗口 Z-score 用于识别突变，固定阈值用于告警；可选 Webhook 异步发送告警，Prometheus 暴露 Gauge、Histogram 和 Counter。
+**PerformanceMonitor 周期拉取运行统计。** 监控任务按 interval 读取 CustomerAgentRuntime 与 ToolRegistry 的成功率、平均延迟、连续失败数和熔断状态。滑动窗口 Z-score 用于识别突变，固定阈值用于告警；可选 Webhook 异步发送告警，Prometheus 暴露 Gauge 和 Counter。
 
-**监控反馈可以影响旧版路由。** Monitor 根据成功率和延迟计算 0 到 0.9 的 routing penalty，并写回 AgentStats，旧 Orchestrator 在同类 Agent 选择时降低异常实例的评分。新 ToolRegistry 虽然具备 get_stats，但当前没有完全接入这条反馈链，这是双运行时尚未收敛的具体表现。
+**主链路统计已经统一。** CustomerAgentRuntime 按领域 Agent 记录请求数、成功率和延迟；MCPToolAdapter 提供工具统计与熔断状态；`/monitor` 和 `/health` 直接读取这些主链路数据。确定性 Router 当前不做基于性能的动态改路由。
 
 ### 本地确定性评测
 
 | 指标                       | 结果          | 判断                  |
 | -------------------------- | ------------- | --------------------- |
 | Intent Accuracy / Macro-F1 | 1.000 / 1.000 | 固定样本全部命中      |
+| User Act Accuracy          | 1.000         | 确认、拒绝和纠正独立计分 |
 | Slot F1 / DST JGA          | 1.000 / 1.000 | 状态样本全部命中      |
 | Recall@5 / MRR             | 0.900 / 0.850 | Dense 与 Hybrid 相同  |
 | Hybrid + Reranker MRR      | 0.525         | 当前测试排序下降      |
-| Tool Selection / Parameter | 0.900 / 0.400 | 参数构造是短板        |
-| Task Completion Rate       | 0.600         | 10 条 E2E 中完成 6 条 |
-| Citation / Faithfulness    | 0.000 / 0.000 | 证据评测闭环未完成    |
+| Tool Selection / Parameter | 1.000 / 1.000 | 工具路径与参数全部命中 |
+| Task Completion Rate       | 1.000         | 10 条 E2E 状态均符合预期 |
+| Citation / Faithfulness    | 0.409 / 0.900 | 确定性证据覆盖口径    |
 
 > **评测口径限制**
 >
@@ -280,13 +281,13 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 ### 评测如何执行
 
-确定性评测由 `evaluation/local_eval_runner.py` 驱动，固定读取 50 条样本，并使用真实项目组件执行 NLU fast-track、DST、Router、领域 Agent、ToolRegistry 和 HybridRetriever。为了保证离线可重复，它不访问远程 LLM，也不下载本地模型，而是注入 FakeDenseIndex、真实 BM25 和确定性 FakeReranker。
+确定性评测由 `evaluation/local_eval_runner.py` 驱动，固定读取 50 条样本。Tool 与 E2E 用例执行真实的 CustomerAgentRuntime、TurnEngine、领域 Agent 和 ToolRegistry；RAG 消融为保证离线可重复，仍使用 FakeDenseIndex、真实 BM25 和确定性 FakeReranker，不访问远程 LLM，也不下载本地模型。
 
 样本分为 DST、Tool、RAG、E2E 和 NLU 五组。指标层分别计算 Intent Accuracy / Macro-F1、Slot Precision / Recall / F1、DST Joint Goal Accuracy、Recall@5、MRR、工具选择与参数准确率、任务完成率、Citation Precision 和 Faithfulness。
 
 消融会在 dense、hybrid、rerank 三种模式下重复执行同一批样本。当前 FakeDenseIndex 依赖 token overlap，FakeReranker 依赖稳定哈希，因此结果适合做代码回归，不等价于 BGE 与 Cross-Encoder 的真实离线效果。另一个 legacy EndToEndEvaluator 支持 LLM-as-Judge，但受模型波动和调用成本影响，不作为当前确定性报告的依据。
 
-全量 pytest 覆盖状态转移、跨轮恢复、确认门禁、MCP initialize/list/call、退款幂等、RAG Loader/索引/融合、记忆压缩与画像门控、Trace 脱敏和 API 回归。当前验证结果为 238 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
+全量 pytest 覆盖状态转移、跨轮恢复、确认门禁、MCP initialize/list/call、退款与工单幂等、RAG Loader/索引/融合、记忆压缩与画像门控、主链路监控、后台任务 drain、Trace allowlist 和 API 回归。当前验证结果为 277 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
 
 ## 6. API 与部署形态
 
@@ -334,9 +335,9 @@ export ANTHROPIC_API_KEY=your_key
 | ------ | ----------------- | ------------------------------------------------------------------ |
 | **P0** | 引用忠实度闭环    | 补充真实知识证据、引用支持标注和 grounded 判定                     |
 | **P0** | 工具参数准确率    | 覆盖缺参、纠正、跨轮继承和 action_id 构造                          |
-| **P1** | 收敛双运行时      | 把旧监控、查询改写和评测迁移到 CustomerAgentRuntime / ToolRegistry |
+| **P1** | 验证主链路上下文收益 | 评估 Skills、摘要、历史和画像对真实问答质量的增益 |
 | **P1** | 验证 Hybrid 收益  | 使用更有区分度的数据集和真实模型重新做消融                         |
-| **P2** | Skills 主链路消费 | 明确 Skill 对动作选择和响应生成的作用位置与评测口径                |
+| **P2** | 上下文效果验证     | 使用真实问题集验证 Skills、摘要、历史和画像的实际增益               |
 | **P2** | 生产工程化        | 补齐鉴权、审计、限流、持久 Trace、真实订单系统和压测               |
 
 ---

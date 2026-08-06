@@ -46,7 +46,6 @@ BANNER = r"""
 # ── 全局组件（lifespan 中初始化）─────────────────────────────────────────────
 _orchestrator = None
 _memory       = None
-_tool_manager = None
 _monitor      = None
 _evaluator    = None
 _skill_manager = None
@@ -54,6 +53,39 @@ _customer_runtime = None
 _mcp_client = None
 _trace_store = None
 _knowledge_runtime = None
+_tool_registry = None
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background_task(coro, *, name: str) -> asyncio.Task:
+    """Track fire-and-forget work so failures and shutdown are observable."""
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+
+    def done(completed: asyncio.Task) -> None:
+        _background_tasks.discard(completed)
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error is not None:
+            logger.error("后台任务 %s 失败: %s", completed.get_name(), error)
+
+    task.add_done_callback(done)
+    return task
+
+
+async def _drain_background_tasks(timeout_s: float = 5.0) -> None:
+    """Wait for tracked work during shutdown, then cancel stragglers."""
+    if not _background_tasks:
+        return
+    tasks = list(_background_tasks)
+    done, pending = await asyncio.wait(tasks, timeout=timeout_s)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        _background_tasks.discard(task)
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -71,12 +103,12 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def _runtime_components(app: FastAPI):
-    global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
+    global _orchestrator, _memory, _monitor, _evaluator, _skill_manager
     global _customer_runtime, _mcp_client, _trace_store, _knowledge_runtime
+    global _tool_registry
 
     print(BANNER, flush=True)
 
-    from agents.agent_orchestrator import AgentOrchestrator
     from agents.domain_agents import (
         AfterSalesAgent,
         DomainAgentRuntime,
@@ -93,9 +125,7 @@ async def _runtime_components(app: FastAPI):
     from core.tool_registry import ToolRegistry
     from core.trace_store import TraceStore
     from core.turn_engine import TurnEngine
-    from evaluation.evaluator import EndToEndEvaluator
     from mcp.knowledge_base import KnowledgeBase
-    from mcp.tool_manager import MCPToolManager, Tool
     from memory.conversation_memory import MemoryManager
     from monitor.performance_monitor import PerformanceMonitor
     from core.skill_loader import SkillManager
@@ -121,14 +151,6 @@ async def _runtime_components(app: FastAPI):
     )
     _skill_manager.load()
 
-    # Agent 编排器
-    _orchestrator = AgentOrchestrator(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-        skill_manager=_skill_manager,
-    )
-
     # 记忆与 Dialogue State 使用同一个 Redis 连接，但保存到不同 key。
     redis_client = redis.from_url(
         os.getenv("REDIS_URL", "redis://redis:6379/0"),
@@ -146,12 +168,7 @@ async def _runtime_components(app: FastAPI):
         redis_client=redis_client,
     )
 
-    # MCP 工具管理器 + RAG 知识库（基于 ChromaDB 的真实检索）
-    _tool_manager = MCPToolManager(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-    )
+    # RAG 知识库（基于 ChromaDB 的真实检索）
     kb = KnowledgeBase(
         chroma_host=os.getenv("CHROMA_HOST", "chromadb"),
         chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
@@ -159,42 +176,24 @@ async def _runtime_components(app: FastAPI):
     )
     logger.info(f"知识库已加载: {kb.doc_count} 个文档片段")
 
-    def knowledge_fallback(params: Dict[str, Any], context: Optional[Dict[str, Any]], error: str):
-        query = params.get("query", "")
-        return [{
-            "title": "知识库降级结果",
-            "content": f"知识库暂时不可用，未能完成对“{query}”的语义检索。请稍后重试，或转人工客服确认。",
-            "score": 0.0,
-            "fallback": True,
-            "error": error,
-        }]
-
-    _tool_manager.register(Tool(
-        name="knowledge_search",
-        description="搜索知识库（基于 ChromaDB 向量检索）",
-        handler=kb.search_handler,
-        schema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "top_k": {"type": "integer"},
-            },
-            "required": ["query"],
-        },
-        cache_ttl=300.0,
-        supports_rerank=True,
-        fallback=knowledge_fallback,
-    ))
-
     # 新运行时统一通过 ToolRegistry 调用 Hybrid RAG 与标准 MCP 工具。
     registry = ToolRegistry()
+    _tool_registry = registry
+    legacy_threshold = os.getenv("RAG_RELEVANCE_THRESHOLD")
     _knowledge_runtime = KnowledgeRuntime.build(
         kb,
         enable_local_models=local_models_enabled(),
         embedding_provider=os.getenv("RAG_EMBEDDING_PROVIDER"),
         embedding_model=os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5"),
         reranker_model=os.getenv("RAG_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
-        relevance_threshold=float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0")),
+        relevance_threshold=(
+            float(legacy_threshold)
+            if legacy_threshold not in {None, ""}
+            else None
+        ),
+        dense_threshold=float(os.getenv("RAG_DENSE_THRESHOLD", "0.2")),
+        rrf_threshold=float(os.getenv("RAG_RRF_THRESHOLD", "0.01")),
+        rerank_threshold=float(os.getenv("RAG_RERANK_THRESHOLD", "0.1")),
     )
     register_rag_tool(registry, _knowledge_runtime.retriever)
 
@@ -231,26 +230,43 @@ async def _runtime_components(app: FastAPI):
     # 性能监控（可选启动 Prometheus）
     prom_port = int(os.getenv("PROMETHEUS_PORT", "0")) or None
     _monitor = PerformanceMonitor(
-        orchestrator=_orchestrator,
-        tool_manager=_tool_manager,
+        runtime=_customer_runtime,
+        tool_registry=registry,
         interval_s=float(os.getenv("MONITOR_INTERVAL", "10")),
         webhook_url=os.getenv("ALERT_WEBHOOK_URL") or None,
         prometheus_port=prom_port,
+        anomaly_sensitivity=float(
+            os.getenv("ANOMALY_DETECTION_THRESHOLD", "2.5"),
+        ),
     )
     await _monitor.start()
 
-    # 评测器
-    _evaluator = EndToEndEvaluator(
-        orchestrator=_orchestrator,
-        recognizer=recognizer,
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-        baseline_path=os.getenv(
-            "EVAL_BASELINE_PATH",
-            "/app/data/eval/runtime_baseline.json",
-        ),
-    )
+    # Legacy LLM evaluator 仅在显式开关下初始化。
+    _orchestrator = None
+    _evaluator = None
+    if os.getenv("ENABLE_LEGACY_EVAL", "false").lower() in {
+        "1", "true", "yes", "on",
+    }:
+        from agents.agent_orchestrator import AgentOrchestrator
+        from evaluation.evaluator import EndToEndEvaluator
+
+        _orchestrator = AgentOrchestrator(
+            api_key=cfg["api_key"],
+            base_url=cfg.get("base_url"),
+            model=cfg["model"],
+            skill_manager=_skill_manager,
+        )
+        _evaluator = EndToEndEvaluator(
+            orchestrator=_orchestrator,
+            recognizer=recognizer,
+            api_key=cfg["api_key"],
+            base_url=cfg.get("base_url"),
+            model=cfg["model"],
+            baseline_path=os.getenv(
+                "EVAL_BASELINE_PATH",
+                "/app/data/eval/runtime_baseline.json",
+            ),
+        )
 
     logger.info("GGBot 已就绪")
     yield
@@ -258,6 +274,7 @@ async def _runtime_components(app: FastAPI):
 
 async def _shutdown_components() -> None:
     """Best-effort cleanup for normal shutdown and partial startup failures."""
+    await _drain_background_tasks()
     resources = (
         ("monitor", _monitor, "stop"),
         ("mcp_client", _mcp_client, "close"),
@@ -322,9 +339,25 @@ class ChatResponse(BaseModel):
 # ── 路由 ──────────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    if _orchestrator is None:
-        raise HTTPException(503, "服务未就绪")
-    return {"status": "ok", "agents": _orchestrator.get_stats()}
+    components = {
+        "customer_runtime": _customer_runtime is not None,
+        "tool_registry": _tool_registry is not None,
+        "memory": _memory is not None,
+        "mcp_client": _mcp_client is not None,
+        "knowledge_runtime": _knowledge_runtime is not None,
+    }
+    missing = [name for name, ready in components.items() if not ready]
+    if missing:
+        raise HTTPException(
+            503,
+            f"服务未就绪: {', '.join(missing)}",
+        )
+    return {
+        "status": "ok",
+        "components": components,
+        "agents": _customer_runtime.get_stats(),
+        "tools": _tool_registry.get_stats(),
+    }
 
 
 @app.get("/skills", tags=["Skills"])
@@ -386,20 +419,23 @@ async def chat(req: ChatRequest):
 
     await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
     await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response)
+    update_profile = getattr(_memory, "update_profile", None)
+    if update_profile is not None:
+        await update_profile(req.user_id, conv_id)
     if result.status == "completed":
-        asyncio.create_task(_memory.record_episodic_event(
+        _spawn_background_task(_memory.record_episodic_event(
             req.user_id,
             conv_id,
             EpisodicEventType.TASK_COMPLETED,
             metadata={"intent": result.intent, "trace_id": result.trace_id},
-        ))
+        ), name=f"episodic:{conv_id}:completed")
     elif result.escalated:
-        asyncio.create_task(_memory.record_episodic_event(
+        _spawn_background_task(_memory.record_episodic_event(
             req.user_id,
             conv_id,
             EpisodicEventType.HANDOFF,
             metadata={"intent": result.intent, "trace_id": result.trace_id},
-        ))
+        ), name=f"episodic:{conv_id}:handoff")
 
     return ChatResponse(
         conv_id=conv_id,
@@ -442,14 +478,25 @@ async def prometheus_metrics():
 
 @app.post("/search")
 async def search(query: str, top_k: int = 5):
-    """
-    演示检索优化链路：查询改写 → 并行召回 → 重排 → Top-K。
-    展示 MCP 工具调用的核心亮点。
-    """
-    if _tool_manager is None:
+    """使用主 HybridRetriever 执行检索、重排和引用生成。"""
+    if _knowledge_runtime is None:
         raise HTTPException(503, "服务未就绪")
-    result = await _tool_manager.search_with_rewrite("knowledge_search", query, top_k=top_k)
-    return {"query": query, "results": result.data, "reranked": result.reranked}
+    result = await asyncio.to_thread(
+        _knowledge_runtime.retriever.search,
+        query,
+        top_k=top_k,
+        use_sparse=True,
+        use_reranker=True,
+    )
+    payload = result.model_dump(mode="json")
+    return {
+        "query": query,
+        "results": payload["hits"],
+        "citations": payload["citations"],
+        "answered": payload["answered"],
+        "reason": payload["reason"],
+        "reranked": True,
+    }
 
 
 class DocInput(BaseModel):
@@ -480,7 +527,7 @@ class EvalDialogInput(BaseModel):
 
 class EvalRunInput(BaseModel):
     """评测请求。为空时使用内置默认用例。"""
-    mode: str = "legacy"
+    mode: str = "customer_agent"
     intent_cases: Optional[List[EvalIntentInput]] = None
     dialog_cases: Optional[List[EvalDialogInput]] = None
 
@@ -502,16 +549,11 @@ async def add_knowledge(body: BatchDocInput):
     }
     ```
     """
-    tool = _tool_manager._tools.get("knowledge_search") if _tool_manager else None
-    if tool is None:
+    if _knowledge_runtime is None:
         raise HTTPException(503, "知识库未初始化")
-    kb = tool.handler.__self__
+    kb = _knowledge_runtime.knowledge_base
     documents = [{"title": d.title, "content": d.content} for d in body.documents]
-    count = (
-        _knowledge_runtime.add_documents(documents)
-        if _knowledge_runtime is not None
-        else kb.add_documents(documents)
-    )
+    count = _knowledge_runtime.add_documents(documents)
     return {"message": f"成功导入 {count} 个文档片段", "added_chunks": count, "total_chunks": kb.doc_count}
 
 
@@ -526,10 +568,9 @@ async def upload_knowledge(file: UploadFile = File(...)):
 
     文件大小限制：10MB
     """
-    tool = _tool_manager._tools.get("knowledge_search") if _tool_manager else None
-    if tool is None:
+    if _knowledge_runtime is None:
         raise HTTPException(503, "知识库未初始化")
-    kb = tool.handler.__self__
+    kb = _knowledge_runtime.knowledge_base
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
@@ -546,23 +587,12 @@ async def upload_knowledge(file: UploadFile = File(...)):
                 raise HTTPException(400, "JSON 文件应为数组格式: [{title, content}, ...]")
         except _json.JSONDecodeError as e:
             raise HTTPException(400, f"JSON 解析失败: {e}")
-        count = (
-            _knowledge_runtime.add_documents(docs)
-            if _knowledge_runtime is not None
-            else kb.add_documents(docs)
-        )
+        count = _knowledge_runtime.add_documents(docs)
     else:
-        if _knowledge_runtime is None:
-            if filename.lower().endswith(".pdf"):
-                raise HTTPException(503, "Hybrid RAG 未初始化")
-            text = content.decode("utf-8", errors="ignore")
-            title = filename.rsplit(".", 1)[0] if "." in filename else filename
-            count = kb.add_documents([{"title": title, "content": text}])
-        else:
-            try:
-                count = _knowledge_runtime.add_file(filename, content)
-            except ValueError as ex:
-                raise HTTPException(400, str(ex)) from ex
+        try:
+            count = _knowledge_runtime.add_file(filename, content)
+        except ValueError as ex:
+            raise HTTPException(400, str(ex)) from ex
     return {
         "message": f"文件 {filename} 导入成功",
         "added_chunks": count,
@@ -573,17 +603,16 @@ async def upload_knowledge(file: UploadFile = File(...)):
 @app.get("/knowledge/stats", tags=["知识库"])
 async def knowledge_stats():
     """查看知识库统计信息（文档片段总数）。"""
-    tool = _tool_manager._tools.get("knowledge_search") if _tool_manager else None
-    if tool is None:
+    if _knowledge_runtime is None:
         raise HTTPException(503, "知识库未初始化")
-    kb = tool.handler.__self__
+    kb = _knowledge_runtime.knowledge_base
     return {"total_chunks": kb.doc_count}
 
 
 @app.post("/eval/run")
 async def run_eval(body: Optional[EvalRunInput] = None):
     """运行内置评测用例，返回评测报告。"""
-    if body and body.mode == "customer_agent":
+    if body is None or body.mode == "customer_agent":
         from evaluation.local_eval_runner import run_local_eval
 
         report = await run_local_eval()
@@ -595,7 +624,7 @@ async def run_eval(body: Optional[EvalRunInput] = None):
             "summary": report.summary,
         }
 
-    if body and body.mode != "legacy":
+    if body.mode != "legacy":
         raise HTTPException(400, f"不支持的评测模式: {body.mode}")
 
     if _evaluator is None:
@@ -683,59 +712,28 @@ async def _cli():
     print("GGBot CLI — 输入 quit 退出")
     print(f"日志已重定向到: {log_file}\n")
 
-    from agents.agent_orchestrator import AgentOrchestrator, Request
-    from memory.conversation_memory import MemoryManager, MsgRole
-    from core.skill_loader import SkillManager
-
-    cfg = _anthropic_cfg()
-    skill_manager = SkillManager(
-        root_dir=os.getenv("GGBOT_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills")),
-        max_prompt_chars=int(os.getenv("GGBOT_SKILLS_MAX_PROMPT_CHARS", "5000")),
-    )
-    skill_manager.load()
-    orch = AgentOrchestrator(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-        skill_manager=skill_manager,
-    )
-    mem  = MemoryManager(
-        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-        chroma_host=os.getenv("CHROMA_HOST", "localhost"),
-        chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
-        chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/tmp/chroma"),
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url"),
-        model=cfg["model"],
-    )
-
     user_id, conv_id = "cli_user", str(uuid.uuid4())
+    async with lifespan(app):
+        while True:
+            try:
+                msg = input(f"{_CLI_CYAN}你{_CLI_RESET}: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n{_CLI_YELLOW}再见 ʕ•ᴥ•ʔ{_CLI_RESET}")
+                break
+            if not msg or msg.lower() in ("quit", "exit", "退出"):
+                print(f"{_CLI_YELLOW}再见 ʕ•ᴥ•ʔ{_CLI_RESET}")
+                break
 
-    while True:
-        try:
-            msg = input(f"{_CLI_CYAN}你{_CLI_RESET}: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{_CLI_YELLOW}再见 ʕ•ᴥ•ʔ{_CLI_RESET}")
-            break
-        if not msg or msg.lower() in ("quit", "exit", "退出"):
-            print(f"{_CLI_YELLOW}再见 ʕ•ᴥ•ʔ{_CLI_RESET}")
-            break
-
-        ctx = await mem.get_context(user_id, conv_id, query=msg)
-        history = [
-            {"role": m.role.value, "content": m.content}
-            for m in ctx.recent_messages[-5:]
-        ] if ctx.recent_messages else None
-        req = Request(message=msg, user_id=user_id, conv_id=conv_id, context=ctx.to_prompt_text(), history=history)
-        result = await orch.run(req)
-
-        await mem.add_message(user_id, conv_id, MsgRole.USER, msg)
-        await mem.add_message(user_id, conv_id, MsgRole.ASSISTANT, result.response)
-
-        agent_tag = result.agent_type.value
-        print(f"\n{_CLI_GREEN}GGBot{_CLI_RESET} "
-              f"{_CLI_DIM}[{agent_tag}]{_CLI_RESET}: "
-              f"{result.response}\n")
+            result = await chat(ChatRequest(
+                message=msg,
+                user_id=user_id,
+                conv_id=conv_id,
+            ))
+            print(
+                f"\n{_CLI_GREEN}GGBot{_CLI_RESET} "
+                f"{_CLI_DIM}[{result.agent_type}]{_CLI_RESET}: "
+                f"{result.response}\n"
+            )
 
 
 if __name__ == "__main__":

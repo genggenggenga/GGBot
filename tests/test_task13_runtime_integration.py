@@ -16,10 +16,15 @@ from rag.runtime import KnowledgeRuntime
 class FakeKnowledgeBase:
     def __init__(self):
         self.documents = []
+        self.chunks = []
 
     def add_documents(self, documents):
         self.documents.extend(documents)
         return len(documents)
+
+    def add_chunks(self, chunks):
+        self.chunks.extend(chunks)
+        return len(chunks)
 
 
 class FakeDense:
@@ -51,10 +56,13 @@ def test_pdf_ingestion_updates_dense_and_bm25(monkeypatch, tmp_path):
     assert count == 1
     assert dense.added[0].page == 1
     assert sparse.search("PDF-ONLY", 1)[0].chunk.page == 1
-    assert knowledge_base.documents[0]["section"] == "page 1"
+    assert knowledge_base.chunks[0].section == "page 1"
+    assert knowledge_base.chunks[0].page == 1
 
 
-def test_runtime_build_wires_embedding_and_reranker(monkeypatch):
+def test_runtime_build_reuses_canonical_collection_and_wires_reranker(
+    monkeypatch,
+):
     calls = {}
 
     class Collection:
@@ -76,10 +84,10 @@ def test_runtime_build_wires_embedding_and_reranker(monkeypatch):
         def __init__(self, model_name):
             calls["reranker"] = model_name
 
-    monkeypatch.setattr("rag.runtime.build_bge_embedding_function", lambda name: f"embedding:{name}")
     monkeypatch.setattr("rag.runtime.ChromaDenseIndex", Dense)
     monkeypatch.setattr("rag.runtime.CrossEncoderReranker", Reranker)
-    kb = SimpleNamespace(_collection=Collection(), _client=Client())
+    collection = Collection()
+    kb = SimpleNamespace(_collection=collection, _client=Client())
 
     runtime = KnowledgeRuntime.build(
         kb,
@@ -88,7 +96,7 @@ def test_runtime_build_wires_embedding_and_reranker(monkeypatch):
         reranker_model="reranker-test",
     )
 
-    assert calls["dense"]["embedding_function"] == "embedding:bge-test"
+    assert calls["dense"] == {"collection": collection}
     assert calls["reranker"] == "reranker-test"
     assert runtime.retriever._reranker is not None
 
@@ -104,13 +112,8 @@ def test_pdf_upload_endpoint_uses_runtime_loader(monkeypatch):
 
     runtime = Runtime()
     kb = SimpleNamespace(doc_count=12)
-    tool = SimpleNamespace(handler=SimpleNamespace(__self__=kb))
+    runtime.knowledge_base = kb
     monkeypatch.setattr(api_main, "_knowledge_runtime", runtime)
-    monkeypatch.setattr(
-        api_main,
-        "_tool_manager",
-        SimpleNamespace(_tools={"knowledge_search": tool}),
-    )
     upload = UploadFile(file=BytesIO(b"pdf-bytes"), filename="policy.pdf")
 
     result = asyncio.run(api_main.upload_knowledge(upload))

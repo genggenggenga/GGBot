@@ -13,6 +13,7 @@
   - 用户画像只记录稳定偏好，订单号/物流号/订单状态等时效事实禁止写入画像
   - 保持 API 向后兼容，不修改 /chat 调用方式
 """
+import asyncio
 import hashlib
 import inspect
 import json
@@ -35,6 +36,17 @@ if TYPE_CHECKING:
     from core.state_store import StateStore
 
 logger = logging.getLogger(__name__)
+_EMBEDDING_FUNCTION_UNSET = object()
+
+
+async def _backend_call(func, *args, **kwargs):
+    """Run sync storage clients off-loop while accepting async clients too."""
+    if inspect.iscoroutinefunction(func):
+        return await func(*args, **kwargs)
+    result = await asyncio.to_thread(func, *args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _resolve_memory_embedding_function():
@@ -196,6 +208,7 @@ class MemoryManager:
         # 测试用注入点
         redis_client: Optional[Any] = None,
         chroma_client: Optional[Any] = None,
+        embedding_function: Any = _EMBEDDING_FUNCTION_UNSET,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
@@ -233,7 +246,12 @@ class MemoryManager:
         # 用户画像：存储稳定偏好
         # Embedding function 由 RAG_EMBEDDING_PROVIDER 控制（默认 SiliconFlow API，
         # 避免 ChromaDB 默认 ONNX 模型的 79MB 下载）。
-        embedding_function = _resolve_memory_embedding_function()
+        if embedding_function is _EMBEDDING_FUNCTION_UNSET:
+            embedding_function = (
+                None
+                if chroma_client is not None
+                else _resolve_memory_embedding_function()
+            )
         self._episodic = chroma.get_or_create_collection(
             "episodic", embedding_function=embedding_function
         )
@@ -262,16 +280,16 @@ class MemoryManager:
         key = self._wm_key(user_id, conv_id)
 
         # 追加到 Redis 列表（左推，最新在前）
-        self._redis.lpush(key, json.dumps({
+        await _backend_call(self._redis.lpush, key, json.dumps({
             "role":      msg.role.value,
             "content":   msg.content,
             "ts":        msg.timestamp.isoformat(),
             "metadata":  msg.metadata,
         }))
-        self._redis.expire(key, 86400)  # 24h TTL
+        await _backend_call(self._redis.expire, key, 86400)
 
         # 超过压缩阈值时触发覆盖式压缩
-        if self._redis.llen(key) >= self.COMPRESS_AT:
+        if await _backend_call(self._redis.llen, key) >= self.COMPRESS_AT:
             await self._compress(user_id, conv_id)
 
     async def update_profile(self, user_id: str, conv_id: str) -> None:
@@ -329,11 +347,12 @@ class MemoryManager:
             doc_text = self._safe_text(json.dumps(merged, ensure_ascii=False))
 
             try:
-                self._profile.delete(ids=[doc_id])
+                await _backend_call(self._profile.delete, ids=[doc_id])
             except Exception:
                 pass
 
-            self._profile.add(
+            await _backend_call(
+                self._profile.add,
                 ids=[doc_id],
                 documents=[doc_text],
                 metadatas=[{"user_id": user_id, "ts": datetime.now().isoformat()}],
@@ -359,7 +378,13 @@ class MemoryManager:
         user_id = self._safe_text(user_id)
         conv_id = self._safe_text(conv_id)
         messages = await self._get_working_memory(user_id, conv_id)
-        existing_summary = self._redis.get(self._summary_key(user_id, conv_id)) or ""
+        existing_summary = (
+            await _backend_call(
+                self._redis.get,
+                self._summary_key(user_id, conv_id),
+            )
+            or ""
+        )
 
         # 如果没有提供摘要，从最近消息 + 旧摘要生成一个简短摘要
         if summary is None:
@@ -428,7 +453,13 @@ class MemoryManager:
         profile = await self._get_profile(user_id)
 
         # 4. 会话摘要（覆盖式，有界）
-        summary = self._redis.get(self._summary_key(user_id, conv_id)) or ""
+        summary = (
+            await _backend_call(
+                self._redis.get,
+                self._summary_key(user_id, conv_id),
+            )
+            or ""
+        )
 
         # 5. DialogueState（DST），独立来源
         state = dialogue_state
@@ -474,7 +505,7 @@ class MemoryManager:
 
         # 构建输入：旧摘要 + 待压缩消息
         skey = self._summary_key(user_id, conv_id)
-        old_summary = self._redis.get(skey) or ""
+        old_summary = await _backend_call(self._redis.get, skey) or ""
 
         parts = []
         if old_summary:
@@ -491,17 +522,17 @@ class MemoryManager:
         )
 
         # 直接覆盖旧摘要（核心改动：不追加）
-        self._redis.setex(skey, 86400, new_summary)
+        await _backend_call(self._redis.setex, skey, 86400, new_summary)
 
         # 重置工作记忆为最近 KEEP_RECENT 条
         key = self._wm_key(user_id, conv_id)
-        self._redis.delete(key)
+        await _backend_call(self._redis.delete, key)
         for m in reversed(keep):
-            self._redis.lpush(key, json.dumps({
+            await _backend_call(self._redis.lpush, key, json.dumps({
                 "role": m.role.value, "content": m.content,
                 "ts": m.timestamp.isoformat(), "metadata": m.metadata,
             }))
-        self._redis.expire(key, 86400)
+        await _backend_call(self._redis.expire, key, 86400)
         logger.info(
             f"工作记忆覆盖式压缩完成: {user_id}/{conv_id}，摘要 {len(new_summary)} 字"
         )
@@ -591,7 +622,12 @@ class MemoryManager:
 
     async def _get_working_memory(self, user_id: str, conv_id: str) -> List[Message]:
         key  = self._wm_key(user_id, conv_id)
-        raws = self._redis.lrange(key, 0, self.WORKING_MAX - 1)
+        raws = await _backend_call(
+            self._redis.lrange,
+            key,
+            0,
+            self.WORKING_MAX - 1,
+        )
         msgs = []
         for raw in reversed(raws):  # Redis lpush 最新在前，reversed 还原时序
             d = json.loads(raw)
@@ -609,7 +645,8 @@ class MemoryManager:
         if not query_text:
             return []
         try:
-            results = self._episodic.query(
+            results = await _backend_call(
+                self._episodic.query,
                 query_texts=[query_text],
                 n_results=self.HISTORY_TOP_K,
                 where={"user_id": self._safe_text(user_id)},
@@ -643,7 +680,8 @@ class MemoryManager:
             }
             if metadata:
                 meta.update(self._safe_metadata_value(metadata))
-            self._episodic.add(
+            await _backend_call(
+                self._episodic.add,
                 ids=[doc_id],
                 documents=[summary],
                 metadatas=[meta],
@@ -654,7 +692,11 @@ class MemoryManager:
     async def _get_profile(self, user_id: str) -> Dict[str, Any]:
         """获取用户画像（最新合并结果）。"""
         try:
-            results = self._profile.get(where={"user_id": user_id}, limit=1)
+            results = await _backend_call(
+                self._profile.get,
+                where={"user_id": user_id},
+                limit=1,
+            )
             if results["documents"]:
                 return json.loads(results["documents"][0])
         except Exception:

@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from evaluation.agent_metrics import (
     task_completion_rate,
     tool_call_accuracy,
 )
+from monitor.performance_monitor import PerformanceMonitor
 
 
 def test_slot_and_joint_goal_metrics():
@@ -92,6 +94,70 @@ def test_fixed_evaluation_dataset_has_required_coverage():
     }.issubset(categories)
 
 
+def test_monitor_reads_main_runtime_and_tool_registry_stats():
+    class Runtime:
+        def get_stats(self):
+            return {
+                "after_sales": {
+                    "total": 3,
+                    "success_rate": 1.0,
+                    "avg_ms": 12.0,
+                    "routing_score": 1.0,
+                },
+            }
+
+    class Registry:
+        def get_stats(self):
+            return {
+                "create_refund": {
+                    "total": 1,
+                    "success_rate": 1.0,
+                    "avg_latency_ms": 5.0,
+                    "consecutive_fails": 0,
+                    "circuit_state": "closed",
+                },
+            }
+
+    monitor = PerformanceMonitor(
+        runtime=Runtime(),
+        tool_registry=Registry(),
+        interval_s=60,
+    )
+    asyncio.run(monitor._collect())
+    summary = monitor.summary()
+
+    assert summary["agent_stats"]["after_sales"]["total"] == 3
+    assert summary["tool_stats"]["create_refund"]["total"] == 1
+
+
+def test_monitor_deduplicates_active_threshold_alerts():
+    class Runtime:
+        def get_stats(self):
+            return {
+                "after_sales": {
+                    "total": 12,
+                    "success_rate": 0.5,
+                    "avg_ms": 10.0,
+                    "routing_score": 0.5,
+                },
+            }
+
+    class Registry:
+        def get_stats(self):
+            return {}
+
+    monitor = PerformanceMonitor(
+        runtime=Runtime(),
+        tool_registry=Registry(),
+    )
+    asyncio.run(monitor._collect())
+    asyncio.run(monitor._collect())
+
+    alerts = monitor.summary()["active_alerts"]
+    assert len(alerts) == 1
+    assert alerts[0]["metric"] == "agent_success_rate:after_sales"
+
+
 # ── SubTask 12.1: Trace observation summaries and scrubbing ─────────────────
 
 from core.trace_store import (
@@ -105,7 +171,7 @@ from core.agent_models import Observation
 
 
 def test_summarize_observations_trims_data():
-    long_data = {"key": "x" * 500}
+    long_data = {"title": "x" * 500}
     obs = Observation(
         source="tool", name="query_order", success=True, data=long_data,
     )
@@ -244,6 +310,49 @@ def test_trace_store_scrubs_on_append():
     assert len(events) == 1
     for key in _FORBIDDEN_KEYS:
         assert key not in events[0], f"forbidden key {key} in stored trace"
+
+
+def test_trace_store_uses_top_level_allowlist_for_business_fields():
+    store = TraceStore()
+    store.append("t1", {
+        "event": "agent_result",
+        "agent": "order",
+        "success": True,
+        "order_id": "ORD-SECRET",
+        "user_id": "user-secret",
+        "amount": 299.0,
+        "tools": ["query_order"],
+    })
+
+    event = store.get("t1")[0]
+
+    assert event["tools"] == ["query_order"]
+    assert "order_id" not in event
+    assert "user_id" not in event
+    assert "amount" not in event
+
+
+def test_observation_preview_uses_safe_metadata_allowlist():
+    observation = Observation(
+        source="tool",
+        name="query_order",
+        success=True,
+        data={
+            "order_id": "ORD-SECRET",
+            "user_id": "user-secret",
+            "amount": 299.0,
+            "status": "paid",
+            "source": "orders",
+        },
+    )
+
+    preview = summarize_observations([observation])[0]["data_preview"]
+
+    assert "paid" in preview
+    assert "orders" in preview
+    assert "ORD-SECRET" not in preview
+    assert "user-secret" not in preview
+    assert "299" not in preview
 
 
 def test_trace_event_allows_observation_summaries():

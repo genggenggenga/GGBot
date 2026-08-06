@@ -5,6 +5,7 @@ No real Redis, ChromaDB, LLM, or network required.
 """
 import asyncio
 import json
+import threading
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -700,3 +701,24 @@ class TestContextOrdering:
         assert "[用户画像]" in text
         assert "[最近对话]" in text
         assert "[当前业务状态]" not in text
+
+    @pytest.mark.asyncio
+    async def test_sync_memory_backend_runs_off_event_loop_thread(self):
+        event_loop_thread = threading.get_ident()
+        backend_threads = []
+
+        class ThreadAwareRedis(FakeRedis):
+            def lpush(self, key, *values):
+                backend_threads.append(threading.get_ident())
+                return super().lpush(key, *values)
+
+        mgr = MemoryManager(
+            api_key="fake-key",
+            redis_client=ThreadAwareRedis(),
+            chroma_client=FakeChroma(),
+        )
+
+        await mgr.add_message("u1", "c1", MsgRole.USER, "你好")
+
+        assert backend_threads
+        assert backend_threads[0] != event_loop_thread

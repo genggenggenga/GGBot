@@ -2,11 +2,14 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+from pydantic import BaseModel, ConfigDict
+
 from core.agent_models import (
     ConfirmationStatus,
     DialogueState,
     Observation,
     PendingAction,
+    get_intent_schema,
 )
 from core.tool_registry import ToolRegistry
 
@@ -26,6 +29,50 @@ class AgentResult:
     pending_action: Optional[PendingAction] = None
     completed: bool = True
     citations: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+    goal: Optional[str] = None
+    goals: List[str] = field(default_factory=list)
+
+
+class OrderQueryOutput(BaseModel):
+    """Business result returned by query_order."""
+
+    model_config = ConfigDict(extra="allow")
+
+    found: bool = True
+    order_id: Optional[str] = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+
+
+class LogisticsQueryOutput(BaseModel):
+    """Business result returned by track_package."""
+
+    model_config = ConfigDict(extra="allow")
+
+    found: bool = True
+    status: Optional[str] = None
+    current_status: Optional[str] = None
+    error: Optional[str] = None
+
+
+class RefundCreateOutput(BaseModel):
+    """Business result returned by create_refund."""
+
+    model_config = ConfigDict(extra="allow")
+
+    created: bool
+    refund_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class TicketCreateOutput(BaseModel):
+    """Business result returned by create_ticket."""
+
+    model_config = ConfigDict(extra="allow")
+
+    created: bool
+    ticket_id: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -50,7 +97,9 @@ class Router:
     }
 
     def route(self, state: DialogueState) -> str:
-        intent = state.active_intent or "other"
+        return self.route_intent(state.active_intent or "other", state)
+
+    def route_intent(self, intent: str, state: DialogueState) -> str:
         if intent == "billing":
             return (
                 AFTER_SALES_AGENT
@@ -65,7 +114,7 @@ class Router:
         intents: Optional[Sequence[str]] = None,
     ) -> List[str]:
         targets = [
-            self._INTENT_ROUTES.get(intent, self.route(state))
+            self.route_intent(intent, state)
             for intent in (intents or [state.active_intent or "other"])
         ]
         return list(dict.fromkeys(targets))
@@ -80,6 +129,37 @@ class ResponseComposer:
         if responses:
             return "\n\n".join(responses)
         return "抱歉，当前没有得到可用的处理结果。"
+
+
+class GoalCompletionEvaluator:
+    """Evaluate executable completion conditions declared by IntentSchema."""
+
+    @staticmethod
+    def is_complete(intent: str, result: AgentResult) -> bool:
+        if not result.success or result.pending_action is not None:
+            return False
+        condition = get_intent_schema(intent).completion_condition
+        observations = result.observations
+        names = {observation.name for observation in observations}
+
+        if condition in {"response_generated", "response_or_clarification_generated"}:
+            return True
+        if condition == "answer_grounded_in_knowledge":
+            return bool(result.citations)
+        if condition == "order_fact_returned":
+            return "query_order" in names
+        if condition == "logistics_fact_returned":
+            return bool(names & {"query_order", "track_package"})
+        if condition == "refund_created_or_handoff_created":
+            return bool(names & {"create_refund", "check_refund_eligibility", "query_order"})
+        if condition == "handoff_created":
+            return any(
+                observation.name == "create_ticket"
+                and isinstance(observation.data, dict)
+                and observation.data.get("created") is True
+                for observation in observations
+            )
+        return result.completed
 
 
 class ServiceAgent:
@@ -162,7 +242,7 @@ class ServiceAgent:
 class OrderAgent(ServiceAgent):
     name = ORDER_AGENT
     system_prompt = "只根据订单和支付工具返回的事实回答，不猜测订单状态。"
-    allowed_tools = ("query_order", "query_payment")
+    allowed_tools = ("query_order",)
     completion_condition = "order_fact_returned"
 
     def next_action(self, state, message, observations):
@@ -174,11 +254,27 @@ class OrderAgent(ServiceAgent):
 
     def finish(self, state, observations):
         del state
-        order = observations[-1].data
+        order = OrderQueryOutput.model_validate(observations[-1].data or {})
+        if not order.found:
+            return AgentResult(
+                agent=self.name,
+                success=True,
+                response=f"没有找到订单 {order.order_id or ''}，请核对订单号。",
+                observations=observations,
+            )
+        if not order.status:
+            return AgentResult(
+                agent=self.name,
+                success=False,
+                response="订单查询结果缺少状态，暂时无法回答。",
+                observations=observations,
+                completed=False,
+                error="invalid_order_result:missing_status",
+            )
         return AgentResult(
             agent=self.name,
             success=True,
-            response=f"订单 {order.get('order_id')} 当前状态：{order.get('status')}。",
+            response=f"订单 {order.order_id} 当前状态：{order.status}。",
             observations=observations,
         )
 
@@ -207,8 +303,26 @@ class LogisticsAgent(ServiceAgent):
                 response="没有找到对应订单，暂时无法查询物流。",
                 observations=observations,
             )
-        logistics = observations[-1].data
-        status = logistics.get("status") or logistics.get("current_status")
+        logistics = LogisticsQueryOutput.model_validate(
+            observations[-1].data or {},
+        )
+        if not logistics.found:
+            return AgentResult(
+                agent=self.name,
+                success=True,
+                response="该订单暂无物流信息。",
+                observations=observations,
+            )
+        status = logistics.status or logistics.current_status
+        if not status:
+            return AgentResult(
+                agent=self.name,
+                success=False,
+                response="物流查询结果缺少状态，暂时无法回答。",
+                observations=observations,
+                completed=False,
+                error="invalid_logistics_result:missing_status",
+            )
         return AgentResult(
             agent=self.name,
             success=True,
@@ -228,6 +342,11 @@ class AfterSalesAgent(ServiceAgent):
         "rag_search",
     )
     completion_condition = "refund_created_or_handoff_created"
+    _UNIMPLEMENTED_RESPONSES = {
+        "return_request": "当前版本尚未实现退货操作，请转人工客服继续处理。",
+        "cancel_order": "当前版本尚未实现取消订单操作，请转人工客服继续处理。",
+        "request": "当前版本尚未实现该售后操作，请转人工客服继续处理。",
+    }
 
     async def execute(
         self,
@@ -235,6 +354,18 @@ class AfterSalesAgent(ServiceAgent):
         message: str = "",
         context: str = "",
     ) -> AgentResult:
+        if state.active_intent in {"complaint", "escalation"}:
+            return await self._execute_handoff(state, message, context)
+        if state.active_intent != "refund_request":
+            return AgentResult(
+                agent=self.name,
+                success=True,
+                response=self._UNIMPLEMENTED_RESPONSES.get(
+                    state.active_intent or "",
+                    "当前版本尚未实现该售后操作，请转人工客服继续处理。",
+                ),
+                completed=False,
+            )
         if (
             state.pending_action is not None
             and state.confirmation_status == ConfirmationStatus.PENDING
@@ -247,6 +378,85 @@ class AfterSalesAgent(ServiceAgent):
                 completed=False,
             )
         return await super().execute(state, message, context)
+
+    async def _execute_handoff(
+        self,
+        state: DialogueState,
+        message: str,
+        context: str,
+    ) -> AgentResult:
+        pending = state.pending_action
+        if pending is not None and pending.tool_name == "create_ticket":
+            if state.confirmation_status == ConfirmationStatus.PENDING:
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response="请确认是否创建人工客服工单。",
+                    pending_action=pending,
+                    completed=False,
+                )
+            if state.confirmation_status == ConfirmationStatus.CONFIRMED:
+                self._registry.confirm_action(pending.action_id)
+                arguments = dict(pending.arguments)
+                arguments["action_id"] = pending.action_id
+                tool_result = await self._registry.call(
+                    self.name,
+                    pending.tool_name,
+                    arguments,
+                    context={"prompt_context": context} if context else None,
+                    action_id=pending.action_id,
+                )
+                observation = tool_result.to_observation()
+                if not tool_result.success:
+                    return AgentResult(
+                        agent=self.name,
+                        success=False,
+                        response="人工客服工单创建失败，请稍后重试。",
+                        observations=[observation],
+                        completed=False,
+                        error=tool_result.error,
+                    )
+                ticket = TicketCreateOutput.model_validate(
+                    tool_result.data or {},
+                )
+                if not ticket.created or not ticket.ticket_id:
+                    return AgentResult(
+                        agent=self.name,
+                        success=True,
+                        response=f"人工客服工单未能创建：{ticket.error or '业务系统未返回工单编号'}。",
+                        observations=[observation],
+                    )
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=f"人工客服工单已创建，工单编号：{ticket.ticket_id}。",
+                    observations=[observation],
+                )
+
+        subject = (
+            "用户投诉"
+            if state.active_intent == "complaint"
+            else "用户申请转人工"
+        )
+        action = PendingAction(
+            tool_name="create_ticket",
+            arguments={
+                "subject": subject,
+                "description": message or subject,
+                **(
+                    {"order_id": state.slots["order_id"]}
+                    if state.slots.get("order_id") else {}
+                ),
+            },
+        )
+        self._registry.mark_pending_action(action.action_id)
+        return AgentResult(
+            agent=self.name,
+            success=True,
+            response="我可以为你创建人工客服工单。请确认是否创建。",
+            pending_action=action,
+            completed=False,
+        )
 
     def next_action(self, state, message, observations):
         del message
@@ -277,11 +487,21 @@ class AfterSalesAgent(ServiceAgent):
     def finish(self, state, observations):
         pending = state.pending_action
         if pending is not None and observations[-1].name == "create_refund":
-            refund = observations[-1].data
+            refund = RefundCreateOutput.model_validate(
+                observations[-1].data or {},
+            )
+            if not refund.created or not refund.refund_id:
+                reason = refund.error or "业务系统未返回退款申请编号"
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=f"退款申请未能提交：{reason}。",
+                    observations=observations,
+                )
             return AgentResult(
                 agent=self.name,
                 success=True,
-                response=f"退款申请已提交，申请编号：{refund.get('refund_id')}。",
+                response=f"退款申请已提交，申请编号：{refund.refund_id}。",
                 observations=observations,
             )
 
@@ -327,17 +547,51 @@ class KnowledgeAgent:
         self._registry = registry
         self._registry.set_agent_whitelist(self.name, set(self.allowed_tools))
 
+    @staticmethod
+    def _contextual_query(message: str, context: str) -> str:
+        """Add bounded policy and long-term context to ambiguous RAG queries."""
+        if not context:
+            return message
+        sections = []
+        for label in ("Skills", "会话摘要", "相关历史", "用户画像"):
+            marker = f"[{label}]\n"
+            start = context.find(marker)
+            if start < 0:
+                continue
+            start += len(marker)
+            end = context.find("\n\n[", start)
+            value = context[start:end if end >= 0 else None].strip()
+            if value:
+                sections.append(f"[{label}] {value[:500]}")
+        if not sections:
+            return message
+        suffix = "\n".join(sections)
+        return f"{message}\n\n检索上下文：\n{suffix}"[:1800]
+
     async def execute(
         self,
         state: DialogueState,
         message: str,
         context: str = "",
     ) -> AgentResult:
-        del state
+        deterministic = {
+            "greeting": "你好，我可以帮你查询订单、物流，或处理退款相关问题。",
+            "feedback": "感谢你的反馈，我已记录你的意见。",
+            "other": "请说明你需要查询订单、物流，还是咨询退款政策。",
+        }
+        if state.active_intent in deterministic:
+            return AgentResult(
+                agent=self.name,
+                success=True,
+                response=deterministic[state.active_intent],
+            )
         result = await self._registry.call(
             self.name,
             "rag_search",
-            {"query": message, "mode": "rerank"},
+            {
+                "query": self._contextual_query(message, context),
+                "mode": "rerank",
+            },
             context={"prompt_context": context} if context else None,
         )
         observation = result.to_observation()
@@ -391,6 +645,7 @@ class DomainAgentRuntime:
         self._router = router
         self._agents = agents
         self._composer = composer or ResponseComposer()
+        self._completion = GoalCompletionEvaluator()
 
     async def execute(
         self,
@@ -400,10 +655,22 @@ class DomainAgentRuntime:
         context: str = "",
     ) -> tuple[str, List[AgentResult]]:
         results = []
-        for target in self._router.route_tasks(state, intents):
+        goals = list(intents or [state.active_intent or "other"])
+        assignments: Dict[str, List[str]] = {}
+        for goal in goals:
+            target = self._router.route_intent(goal, state)
+            assignments.setdefault(target, []).append(goal)
+        for target, target_goals in assignments.items():
             agent = self._agents[target]
             if context:
-                results.append(await agent.execute(state, message, context))
+                result = await agent.execute(state, message, context)
             else:
-                results.append(await agent.execute(state, message))
+                result = await agent.execute(state, message)
+            result.goal = target_goals[0]
+            result.goals = target_goals
+            result.completed = all(
+                self._completion.is_complete(goal, result)
+                for goal in target_goals
+            )
+            results.append(result)
         return self._composer.compose(results), results

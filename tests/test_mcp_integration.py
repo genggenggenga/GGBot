@@ -1,12 +1,14 @@
 import asyncio
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 
 from core.mcp_adapter import MCPClient, MCPToolAdapter
 from core.tool_registry import ToolRegistry, ToolType
+from mcp_server import customer_service_server
 
 
 ROOT = Path(__file__).parent.parent.resolve()
@@ -73,16 +75,51 @@ async def idempotent_refund_scenario():
         }
         first = await client.call_tool("create_refund", params)
         second = await client.call_tool("create_refund", params)
+        conflict = await client.call_tool(
+            "create_refund",
+            {
+                **params,
+                "order_id": "ORD-1002",
+            },
+        )
 
         assert first["created"] is True
         assert first["idempotent_replay"] is False
         assert second["created"] is True
         assert second["idempotent_replay"] is True
         assert second["refund_id"] == first["refund_id"]
+        assert conflict["created"] is False
+        assert conflict["error"] == "idempotency_conflict"
 
 
 def test_create_refund_is_idempotent_by_action_id():
     run(idempotent_refund_scenario())
+
+
+def test_refund_eligibility_uses_injected_business_clock(monkeypatch):
+    monkeypatch.setitem(
+        customer_service_server._ORDERS["ORD-1001"],
+        "refundable_until",
+        "2026-08-08",
+    )
+    monkeypatch.setattr(
+        customer_service_server,
+        "_current_date",
+        lambda: date(2026, 8, 8),
+        raising=False,
+    )
+    on_deadline = customer_service_server.check_refund_eligibility("ORD-1001")
+
+    monkeypatch.setattr(
+        customer_service_server,
+        "_current_date",
+        lambda: date(2026, 8, 9),
+        raising=False,
+    )
+    after_deadline = customer_service_server.check_refund_eligibility("ORD-1001")
+
+    assert on_deadline["eligible"] is True
+    assert after_deadline["eligible"] is False
 
 
 async def adapter_scenario():
@@ -139,6 +176,10 @@ async def adapter_scenario():
         )
         assert created.success
         assert created.data["created"] is True
+        stats = registry.get_stats()
+        assert stats["query_order"]["total"] == 1
+        assert stats["create_refund"]["total"] == 1
+        assert stats["create_refund"]["success_rate"] == 1.0
 
 
 def test_mcp_tool_adapter_discovers_and_registers_tools():

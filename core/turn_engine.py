@@ -202,7 +202,7 @@ class TurnEngine:
                     transition = await transition
                 current = apply_transition(current, transition)
             except InvalidTransitionError:
-                raise
+                current = self._fail(current, "invalid_transition")
             except Exception as ex:
                 current = self._fail(
                     current,
