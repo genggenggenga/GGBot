@@ -1,0 +1,301 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1600" viewBox="0 0 1600 1600">
+  <defs>
+    <linearGradient id="headerGradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#102A43"/>
+      <stop offset="100%" stop-color="#173F67"/>
+    </linearGradient>
+    <linearGradient id="runtimeGradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4F46A5"/>
+      <stop offset="100%" stop-color="#37308F"/>
+    </linearGradient>
+    <linearGradient id="managerGradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4F46A5"/>
+      <stop offset="100%" stop-color="#3159A3"/>
+    </linearGradient>
+    <linearGradient id="storageGradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#E1F5EF"/>
+      <stop offset="100%" stop-color="#D8F0F2"/>
+    </linearGradient>
+    <linearGradient id="amberGradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FFF0C2"/>
+      <stop offset="100%" stop-color="#FFE19A"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Canvas and title -->
+  <rect x="0" y="0" width="1600" height="1600" fill="#F7F1E8"/>
+  <rect x="0" y="0" width="1600" height="100" fill="url(#headerGradient)"/>
+  <rect x="0" y="97" width="1600" height="3" fill="#42B8A3"/>
+  <circle cx="52" cy="50" r="23" fill="#4F46A5"/>
+  <path d="M43 42 H61 V58 H43 Z M47 38 H57 M47 62 H57" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round"/>
+  <text x="90" y="46" font-family="Noto Sans SC, sans-serif" font-size="30" font-weight="700" fill="#FFFFFF">4.5 记忆与持久化</text>
+  <text x="90" y="74" font-family="Noto Sans SC, sans-serif" font-size="15" font-weight="500" fill="#BFD0E1">异步装配、受控写入与可排空后台任务的分层记忆架构</text>
+  <rect x="1074" y="25" width="474" height="50" rx="25" fill="#FFFFFF" opacity="0.10" stroke="#88A7C3" stroke-width="1.2"/>
+  <circle cx="1107" cy="50" r="8" fill="#F5B942"/>
+  <text x="1128" y="56" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">同步后端 off-loop · 长期事件化 · 画像稳定门控</text>
+
+  <!-- Layer 1: runtime -->
+  <path d="M38 184 V152 Q38 126 64 126 H632 Q658 126 658 152 V184 Z" fill="url(#runtimeGradient)" stroke="#383189" stroke-width="1.5"/>
+  <path d="M38 184 H658 V344 Q658 370 632 370 H64 Q38 370 38 344 Z" fill="#EEEAF8" stroke="#B7AEDC" stroke-width="1.5"/>
+  <circle cx="72" cy="155" r="16" fill="#FFFFFF" opacity="0.16"/>
+  <path d="M64 155 H80 M72 147 V163" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"/>
+  <text x="99" y="151" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="500" fill="#DAD7F4">运行时入口</text>
+  <text x="99" y="174" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#FFFFFF">Runtime</text>
+
+  <rect x="60" y="207" width="130" height="90" rx="18" fill="#FFFFFF" stroke="#CFC9E7" stroke-width="1.4"/>
+  <circle cx="87" cy="239" r="15" fill="#E9E6F7"/>
+  <path d="M80 234 H94 M80 240 H92 M80 246 H89" stroke="#4F46A5" stroke-width="2.1" stroke-linecap="round"/>
+  <text x="110" y="235" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#716B8E">外部请求</text>
+  <text x="110" y="260" font-family="Noto Sans SC, sans-serif" font-size="17" font-weight="700" fill="#302A6D">API</text>
+
+  <line x1="190" y1="252" x2="213" y2="252" stroke="#6D64B2" stroke-width="2.5"/>
+  <polygon points="224,252 212,245 212,259" fill="#6D64B2"/>
+  <rect x="224" y="197" width="260" height="110" rx="20" fill="#FFFFFF" stroke="#AAA1D4" stroke-width="1.6"/>
+  <rect x="224" y="197" width="8" height="110" rx="4" fill="#4F46A5"/>
+  <text x="250" y="226" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#716B8E">会话执行器</text>
+  <text x="250" y="254" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#302A6D">CustomerAgentRuntime</text>
+  <text x="250" y="282" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#6B6681">按 user_id / conv_id 发起装配</text>
+
+  <line x1="484" y1="252" x2="493" y2="252" stroke="#168696" stroke-width="2.5"/>
+  <polygon points="504,252 492,245 492,259" fill="#168696"/>
+  <rect x="504" y="207" width="144" height="90" rx="18" fill="#E3F2F5" stroke="#8AC7CF" stroke-width="1.5"/>
+  <circle cx="530" cy="237" r="15" fill="#FFFFFF"/>
+  <path d="M523 237 L528 242 L537 232" fill="none" stroke="#168696" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="551" y="235" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="600" fill="#397982">装配结果</text>
+  <text x="518" y="274" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#155B67">分区上下文 → 推理</text>
+
+  <rect x="224" y="323" width="260" height="34" rx="17" fill="#FFFFFF" stroke="#CFC9E7" stroke-width="1.4"/>
+  <circle cx="245" cy="340" r="11" fill="#E9E6F7"/>
+  <path d="M239 337 H251 M241 332 V347 M248 332 V347" stroke="#4F46A5" stroke-width="1.7" stroke-linecap="round"/>
+  <text x="265" y="345" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#716B8E">执行反馈</text>
+  <text x="344" y="345" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#302A6D">Observations</text>
+
+  <!-- Layer 1: context manager -->
+  <path d="M690 184 V152 Q690 126 716 126 H1536 Q1562 126 1562 152 V184 Z" fill="url(#managerGradient)" stroke="#383189" stroke-width="1.5"/>
+  <path d="M690 184 H1562 V344 Q1562 370 1536 370 H716 Q690 370 690 344 Z" fill="#F0EDF8" stroke="#B7AEDC" stroke-width="1.5"/>
+  <circle cx="732" cy="155" r="17" fill="#FFFFFF" opacity="0.16"/>
+  <path d="M724 150 Q732 142 740 150 V160 Q732 168 724 160 Z M728 153 H736 M728 158 H736" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round"/>
+  <text x="760" y="151" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#D7E2F8">上下文装配中心</text>
+  <text x="760" y="175" font-family="Noto Sans SC, sans-serif" font-size="20" font-weight="700" fill="#FFFFFF">MemoryManager.get_context</text>
+  <rect x="1360" y="143" width="172" height="28" rx="14" fill="#FFFFFF" opacity="0.14"/>
+  <text x="1380" y="162" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">async 装配 / off-loop</text>
+
+  <text x="730" y="225" font-family="Noto Sans SC, sans-serif" font-size="13" fill="#403A69">通过 _backend_call 将同步 Redis / Chroma 调用移出事件循环</text>
+  <text x="730" y="252" font-family="Noto Sans SC, sans-serif" font-size="13" fill="#403A69">结构化状态优先；缺失数据按空分区返回，不阻塞 Runtime</text>
+  <rect x="730" y="279" width="232" height="48" rx="18" fill="#FFFFFF" stroke="#CFC9E7" stroke-width="1.3"/>
+  <circle cx="757" cy="303" r="12" fill="#4F46A5"/>
+  <text x="753" y="307" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="779" y="307" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#403A69">请求上下文</text>
+  <rect x="983" y="279" width="232" height="48" rx="18" fill="#FFFFFF" stroke="#9ECFC7" stroke-width="1.3"/>
+  <circle cx="1010" cy="303" r="12" fill="#168696"/>
+  <text x="1006" y="307" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="1032" y="307" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#245E56">返回分区</text>
+  <rect x="1236" y="279" width="266" height="48" rx="18" fill="#FFFFFF" stroke="#CFC9E7" stroke-width="1.3"/>
+  <circle cx="1263" cy="303" r="12" fill="#4F46A5"/>
+  <text x="1259" y="307" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="1285" y="307" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#403A69">回写观察</text>
+
+  <line x1="658" y1="224" x2="679" y2="224" stroke="#645AAE" stroke-width="3"/>
+  <polygon points="690,224 678,217 678,231" fill="#645AAE"/>
+  <line x1="690" y1="264" x2="669" y2="264" stroke="#168696" stroke-width="3"/>
+  <polygon points="658,264 670,257 670,271" fill="#168696"/>
+  <line x1="484" y1="340" x2="679" y2="340" stroke="#645AAE" stroke-width="3"/>
+  <polygon points="690,340 678,333 678,347" fill="#645AAE"/>
+
+  <!-- Layer 2: MemoryContext -->
+  <path d="M38 468 V442 Q38 410 70 410 H1530 Q1562 410 1562 442 V468 Z" fill="#EAE6F5" stroke="#B9B1D3" stroke-width="1.5"/>
+  <path d="M38 468 H1562 V748 Q1562 780 1530 780 H70 Q38 780 38 748 Z" fill="#FCFAF6" stroke="#B9B1D3" stroke-width="1.5"/>
+  <circle cx="73" cy="439" r="15" fill="#4F46A5"/>
+  <path d="M66 439 H80 M73 432 V446" stroke="#FFFFFF" stroke-width="1.9" stroke-linecap="round"/>
+  <text x="101" y="445" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#302A6D">MemoryContext · 稳定分区契约</text>
+  <text x="1280" y="445" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#716B8E">供 Runtime 一次性消费</text>
+
+  <line x1="348" y1="370" x2="348" y2="399" stroke="#168696" stroke-width="3"/>
+  <polygon points="348,410 341,398 355,398" fill="#168696"/>
+  <line x1="1126" y1="370" x2="1126" y2="399" stroke="#645AAE" stroke-width="3"/>
+  <polygon points="1126,410 1119,398 1133,398" fill="#645AAE"/>
+
+  <rect x="72" y="500" width="448" height="52" rx="18" fill="#FFFFFF" stroke="#CAC3DF" stroke-width="1.4"/>
+  <circle cx="101" cy="526" r="12" fill="#E9E5F5"/>
+  <text x="97" y="530" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#4F46A5">S</text>
+  <text x="124" y="531" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#403A69">Skills</text>
+  <rect x="72" y="570" width="448" height="52" rx="18" fill="#FFFFFF" stroke="#CAC3DF" stroke-width="1.4"/>
+  <circle cx="101" cy="596" r="12" fill="#E9E5F5"/>
+  <text x="97" y="600" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#4F46A5">D</text>
+  <text x="124" y="601" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#403A69">DialogueState</text>
+  <rect x="72" y="640" width="448" height="52" rx="18" fill="#FFFFFF" stroke="#CAC3DF" stroke-width="1.4"/>
+  <circle cx="101" cy="666" r="12" fill="#E9E5F5"/>
+  <text x="97" y="670" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#4F46A5">R</text>
+  <text x="124" y="671" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#403A69">recent_messages</text>
+
+  <rect x="1080" y="500" width="448" height="52" rx="18" fill="#FFFFFF" stroke="#9ECFC7" stroke-width="1.4"/>
+  <circle cx="1109" cy="526" r="12" fill="#DEF2ED"/>
+  <text x="1105" y="530" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#157C6B">Σ</text>
+  <text x="1132" y="531" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#245E56">summary</text>
+  <rect x="1080" y="570" width="448" height="52" rx="18" fill="#FFFFFF" stroke="#9ECFC7" stroke-width="1.4"/>
+  <circle cx="1109" cy="596" r="12" fill="#DEF2ED"/>
+  <text x="1105" y="600" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#157C6B">H</text>
+  <text x="1132" y="601" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#245E56">relevant_history</text>
+  <rect x="1080" y="640" width="448" height="52" rx="18" fill="#FFFFFF" stroke="#9ECFC7" stroke-width="1.4"/>
+  <circle cx="1109" cy="666" r="12" fill="#DEF2ED"/>
+  <text x="1105" y="670" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#157C6B">P</text>
+  <text x="1132" y="671" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#245E56">user_profile</text>
+
+  <line x1="520" y1="526" x2="625" y2="548" stroke="#9A93BC" stroke-width="2"/>
+  <line x1="520" y1="596" x2="625" y2="596" stroke="#9A93BC" stroke-width="2"/>
+  <line x1="520" y1="666" x2="625" y2="644" stroke="#9A93BC" stroke-width="2"/>
+  <line x1="975" y1="548" x2="1080" y2="526" stroke="#9A93BC" stroke-width="2"/>
+  <line x1="975" y1="596" x2="1080" y2="596" stroke="#9A93BC" stroke-width="2"/>
+  <line x1="975" y1="644" x2="1080" y2="666" stroke="#9A93BC" stroke-width="2"/>
+
+  <rect x="625" y="510" width="350" height="170" rx="34" fill="#173F67" stroke="#102A43" stroke-width="1.5"/>
+  <circle cx="800" cy="548" r="20" fill="#FFFFFF" opacity="0.12"/>
+  <path d="M791 542 H809 M791 548 H809 M791 554 H805" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round"/>
+  <text x="800" y="594" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">MemoryContext</text>
+  <text x="800" y="620" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#BFD0E1">typed sections</text>
+  <rect x="716" y="640" width="168" height="22" rx="11" fill="#42B8A3" opacity="0.24"/>
+  <text x="800" y="656" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#D9F4EF">显式边界 · 可观测</text>
+
+  <line x1="800" y1="680" x2="800" y2="703" stroke="#9A93BC" stroke-width="2"/>
+  <rect x="625" y="703" width="350" height="48" rx="20" fill="#F0EDF8" stroke="#B9B1D3" stroke-width="1.4"/>
+  <circle cx="658" cy="727" r="12" fill="#4F46A5"/>
+  <text x="654" y="731" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF">O</text>
+  <text x="681" y="732" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#403A69">Observations</text>
+  <text x="72" y="764" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#7C748D">每个分区独立为空、独立追踪，避免把状态与自由文本混成单一 prompt</text>
+
+  <!-- Read and write bridge -->
+  <line x1="758" y1="780" x2="758" y2="815" stroke="#D3941E" stroke-width="3"/>
+  <polygon points="758,826 751,814 765,814" fill="#D3941E"/>
+  <text x="710" y="807" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#9B6810">受控写入</text>
+  <line x1="842" y1="826" x2="842" y2="791" stroke="#168696" stroke-width="3"/>
+  <polygon points="842,780 835,792 849,792" fill="#168696"/>
+  <text x="856" y="807" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#167180">并行读取</text>
+
+  <!-- Layer 3: storage -->
+  <path d="M38 884 V858 Q38 826 70 826 H1530 Q1562 826 1562 858 V884 Z" fill="#167B6B" stroke="#126456" stroke-width="1.6"/>
+  <path d="M38 884 H1562 V1276 Q1562 1308 1530 1308 H70 Q38 1308 38 1276 Z" fill="#EEF7F4" stroke="#84BFB5" stroke-width="1.6"/>
+  <circle cx="73" cy="855" r="15" fill="#FFFFFF" opacity="0.17"/>
+  <path d="M66 850 Q73 844 80 850 V860 Q73 866 66 860 Z" fill="none" stroke="#FFFFFF" stroke-width="1.8"/>
+  <text x="101" y="861" font-family="Noto Sans SC, sans-serif" font-size="20" font-weight="700" fill="#FFFFFF">热 / 温 / 冷分层持久化</text>
+  <text x="1326" y="861" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="#CCEEE7">自然语言记忆存储层</text>
+
+  <!-- Hot layer -->
+  <rect x="60" y="902" width="1480" height="112" rx="24" fill="url(#storageGradient)" stroke="#94CFC4" stroke-width="1.3"/>
+  <rect x="82" y="916" width="96" height="26" rx="13" fill="#167B6B"/>
+  <text x="101" y="934" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF">HOT · 热层</text>
+  <text x="82" y="969" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#9B6810">写</text>
+  <line x1="102" y1="965" x2="129" y2="965" stroke="#D3941E" stroke-width="2.5"/>
+  <polygon points="140,965 128,958 128,972" fill="#D3941E"/>
+  <text x="82" y="995" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#167180">读</text>
+  <line x1="140" y1="991" x2="113" y2="991" stroke="#168696" stroke-width="2.5"/>
+  <polygon points="102,991 114,984 114,998" fill="#168696"/>
+  <text x="158" y="981" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#39766D">每个状态步骤 / 每轮写入</text>
+
+  <rect x="354" y="919" width="522" height="78" rx="18" fill="#FFFFFF" stroke="#8EC6BD" stroke-width="1.4"/>
+  <rect x="354" y="919" width="7" height="78" rx="3.5" fill="#4F46A5"/>
+  <text x="380" y="941" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#6A6386">独立 RedisStateStore</text>
+  <text x="380" y="962" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#302A6D">dst:{user_id}:{conv_id}</text>
+  <text x="380" y="984" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#625D73">Pydantic DialogueState · TTL 24h</text>
+  <text x="674" y="962" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#4F46A5">每个状态步骤持久化写入</text>
+
+  <rect x="898" y="919" width="620" height="78" rx="18" fill="#FFFFFF" stroke="#8EC6BD" stroke-width="1.4"/>
+  <rect x="898" y="919" width="7" height="78" rx="3.5" fill="#168696"/>
+  <text x="924" y="941" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="600" fill="#397982">工作记忆 · Redis List</text>
+  <text x="924" y="962" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#155B67">每轮写 messages + update_profile</text>
+  <text x="1080" y="962" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#536C70">15 条触发 LLM 覆盖式摘要 ≤600 字</text>
+  <text x="1080" y="984" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#168696">摘要后只保留最近 5 条</text>
+
+  <!-- Warm layer -->
+  <rect x="60" y="1030" width="1480" height="105" rx="24" fill="#E5F4EF" stroke="#94CFC4" stroke-width="1.3"/>
+  <rect x="82" y="1044" width="108" height="26" rx="13" fill="#2D9D86"/>
+  <text x="101" y="1062" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF">WARM · 温层</text>
+  <text x="82" y="1094" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#9B6810">事件写</text>
+  <line x1="126" y1="1090" x2="153" y2="1090" stroke="#D3941E" stroke-width="2.5"/>
+  <polygon points="164,1090 152,1083 152,1097" fill="#D3941E"/>
+  <text x="82" y="1118" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#167180">读</text>
+  <line x1="164" y1="1114" x2="137" y2="1114" stroke="#168696" stroke-width="2.5"/>
+  <polygon points="126,1114 138,1107 138,1121" fill="#168696"/>
+
+  <rect x="214" y="1047" width="286" height="72" rx="18" fill="url(#amberGradient)" stroke="#D9A12D" stroke-width="1.4"/>
+  <circle cx="241" cy="1071" r="11" fill="#C88712"/>
+  <path d="M237 1071 L240 1074 L246 1067" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="262" y="1075" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#855A0D">写入门控</text>
+  <text x="235" y="1102" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#6F4B08">任务完成 / 转人工</text>
+  <line x1="500" y1="1083" x2="527" y2="1083" stroke="#C88712" stroke-width="2.5"/>
+  <polygon points="538,1083 526,1076 526,1090" fill="#C88712"/>
+  <rect x="538" y="1047" width="980" height="72" rx="18" fill="#FFFFFF" stroke="#8EC6BD" stroke-width="1.4"/>
+  <text x="565" y="1071" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#155B67">ChromaDB · 情景记忆</text>
+  <text x="565" y="1093" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#536C70">tracked task：summary / event_type / intent / trace_id</text>
+  <text x="997" y="1093" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#168696">跨会话语义检索 → relevant_history</text>
+
+  <!-- Cold layer -->
+  <rect x="60" y="1150" width="1480" height="135" rx="24" fill="#E5F4EF" stroke="#94CFC4" stroke-width="1.3"/>
+  <rect x="82" y="1164" width="100" height="26" rx="13" fill="#1F8C77"/>
+  <text x="101" y="1182" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF">COLD · 冷层</text>
+  <text x="82" y="1217" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#9B6810">受控写</text>
+  <line x1="126" y1="1213" x2="153" y2="1213" stroke="#D3941E" stroke-width="2.5"/>
+  <polygon points="164,1213 152,1206 152,1220" fill="#D3941E"/>
+  <text x="82" y="1243" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#167180">读</text>
+  <line x1="164" y1="1239" x2="137" y2="1239" stroke="#168696" stroke-width="2.5"/>
+  <polygon points="126,1239 138,1232 138,1246" fill="#168696"/>
+
+  <rect x="214" y="1170" width="300" height="94" rx="18" fill="url(#amberGradient)" stroke="#D9A12D" stroke-width="1.4"/>
+  <text x="236" y="1195" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#855A0D">写入门控</text>
+  <text x="236" y="1220" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#6F4B08">消息写入后稳定偏好门控</text>
+  <rect x="236" y="1232" width="150" height="20" rx="10" fill="#FFFFFF" opacity="0.67"/>
+  <text x="252" y="1246" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#855A0D">仅允许字段白名单</text>
+  <line x1="514" y1="1217" x2="541" y2="1217" stroke="#C88712" stroke-width="2.5"/>
+  <polygon points="552,1217 540,1210 540,1224" fill="#C88712"/>
+
+  <rect x="552" y="1170" width="406" height="94" rx="18" fill="#FDECEA" stroke="#D5524A" stroke-width="1.4"/>
+  <circle cx="580" cy="1196" r="11" fill="#D5524A"/>
+  <line x1="575" y1="1191" x2="585" y2="1201" stroke="#FFFFFF" stroke-width="1.8"/>
+  <line x1="585" y1="1191" x2="575" y2="1201" stroke="#FFFFFF" stroke-width="1.8"/>
+  <text x="601" y="1200" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#A62F2A">过滤 / 禁止时效事实</text>
+  <text x="574" y="1227" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#8F3C38">订单号 · 运单号</text>
+  <text x="574" y="1248" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#8F3C38">退款状态等动态业务事实</text>
+  <line x1="958" y1="1217" x2="985" y2="1217" stroke="#C88712" stroke-width="2.5"/>
+  <polygon points="996,1217 984,1210 984,1224" fill="#C88712"/>
+
+  <rect x="996" y="1170" width="522" height="94" rx="18" fill="#FFFFFF" stroke="#8EC6BD" stroke-width="1.4"/>
+  <text x="1022" y="1197" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#155B67">ChromaDB · 用户画像</text>
+  <text x="1022" y="1223" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#536C70">白名单覆盖合并 · shutdown drain</text>
+  <text x="1260" y="1223" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#168696">稳定事实 → user_profile</text>
+
+  <!-- Layer 4: governance -->
+  <rect x="38" y="1334" width="980" height="210" rx="30" fill="#173F67" stroke="#102A43" stroke-width="1.5"/>
+  <text x="70" y="1370" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#AFC7DA">硬边界 · Structured State ≠ Natural-language Memory</text>
+  <text x="70" y="1402" font-family="Noto Sans SC, sans-serif" font-size="21" font-weight="700" fill="#FFFFFF">结构化业务状态与自然语言记忆 key 空间分离</text>
+  <rect x="70" y="1430" width="390" height="48" rx="24" fill="#4F46A5"/>
+  <circle cx="97" cy="1454" r="10" fill="#FFFFFF" opacity="0.2"/>
+  <text x="116" y="1459" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">State key：dst:{user_id}:{conv_id}</text>
+  <circle cx="515" cy="1454" r="22" fill="#D5524A"/>
+  <line x1="505" y1="1444" x2="525" y2="1464" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <line x1="525" y1="1444" x2="505" y2="1464" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <text x="548" y="1459" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#FFCFCC">禁止复用 / 拼接 / 混写</text>
+  <rect x="70" y="1490" width="390" height="38" rx="19" fill="#167B6B"/>
+  <circle cx="97" cy="1509" r="9" fill="#FFFFFF" opacity="0.2"/>
+  <text x="116" y="1514" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">Memory key：按存储域独立命名</text>
+
+  <rect x="1042" y="1334" width="520" height="210" rx="30" fill="#FFF9EC" stroke="#D9A12D" stroke-width="1.6"/>
+  <text x="1072" y="1370" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#9B6810">CORE PRINCIPLES</text>
+  <text x="1072" y="1402" font-family="Noto Sans SC, sans-serif" font-size="21" font-weight="700" fill="#5E430E">记忆治理的三个不变量</text>
+  <circle cx="1090" cy="1452" r="18" fill="#4F46A5"/>
+  <text x="1085" y="1458" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">1</text>
+  <text x="1118" y="1457" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#403A69">短期有界</text>
+  <circle cx="1260" cy="1452" r="18" fill="#2D9D86"/>
+  <text x="1255" y="1458" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">2</text>
+  <text x="1288" y="1457" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#245E56">长期事件化</text>
+  <circle cx="1090" cy="1503" r="18" fill="#C88712"/>
+  <text x="1085" y="1509" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">3</text>
+  <text x="1118" y="1508" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#6F4B08">画像只存稳定事实</text>
+
+  <!-- Legend -->
+  <rect x="1120" y="1564" width="442" height="24" rx="12" fill="#F4EEE4"/>
+  <line x1="1138" y1="1576" x2="1166" y2="1576" stroke="#168696" stroke-width="3"/>
+  <text x="1174" y="1580" font-family="Noto Sans SC, sans-serif" font-size="9" font-weight="700" fill="#167180">读取</text>
+  <line x1="1222" y1="1576" x2="1250" y2="1576" stroke="#D3941E" stroke-width="3"/>
+  <text x="1258" y="1580" font-family="Noto Sans SC, sans-serif" font-size="9" font-weight="700" fill="#9B6810">受控写入</text>
+  <rect x="1334" y="1570" width="14" height="12" rx="3" fill="#FDECEA" stroke="#D5524A" stroke-width="1"/>
+  <text x="1356" y="1580" font-family="Noto Sans SC, sans-serif" font-size="9" font-weight="700" fill="#A62F2A">过滤 / 禁止项</text>
+</svg>

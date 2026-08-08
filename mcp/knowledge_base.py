@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 
 import chromadb
 
-from rag.loaders import chunk_sections
+from rag.loaders import ChunkingConfig, chunk_sections
 from rag.models import DocumentChunk, LoadedSection
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ class KnowledgeBase:
             metadata={"description": "GGBot RAG 知识库"},
             embedding_function=embedding_function,
         )
+        self._chunking_config = ChunkingConfig.from_env()
 
         # 如果知识库为空，导入默认文档
         if self._collection.count() == 0:
@@ -114,7 +115,11 @@ class KnowledgeBase:
             for document in documents
             if str(document.get("content", "")).strip()
         ]
-        return self.add_chunks(chunk_sections(sections))
+        return self.add_chunks(chunk_sections(
+            sections,
+            chunk_size=self._chunking_config.chunk_size,
+            chunk_overlap=self._chunking_config.chunk_overlap,
+        ))
 
     def add_chunks(self, chunks: List[DocumentChunk]) -> int:
         """Persist canonical chunks and their full citation metadata."""

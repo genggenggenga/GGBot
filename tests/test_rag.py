@@ -6,9 +6,10 @@ import pytest
 
 from core.tool_registry import ToolRegistry, ToolType
 from rag.indexes import BM25Index, ChromaDenseIndex
-from rag.loaders import chunk_sections, load_document
+from rag.loaders import ChunkingConfig, chunk_sections, load_document
 from rag.models import DocumentChunk, SearchHit
 from rag.retriever import HybridRetriever, reciprocal_rank_fusion
+from rag.tokenization import count_tokens
 from rag.tool import register_rag_tool
 
 
@@ -128,6 +129,42 @@ def test_loader_rejects_unsupported_type(tmp_path):
 def test_chunk_configuration_is_validated():
     with pytest.raises(ValueError):
         chunk_sections([], chunk_size=10, chunk_overlap=10)
+
+
+def test_chunking_config_reads_token_budgets_from_env(monkeypatch):
+    monkeypatch.setenv("RAG_CHUNK_SIZE_TOKENS", "64")
+    monkeypatch.setenv("RAG_CHUNK_OVERLAP_TOKENS", "8")
+
+    config = ChunkingConfig.from_env()
+
+    assert config.chunk_size == 64
+    assert config.chunk_overlap == 8
+
+
+def test_chunking_enforces_token_budget_and_overlap():
+    text = " ".join(f"token-{index}" for index in range(40))
+    sections = [
+        SimpleNamespace(
+            text=text,
+            source="tokens.txt",
+            title="Tokens",
+            section="",
+            page=None,
+            metadata={},
+        ),
+    ]
+
+    chunks = chunk_sections(sections, chunk_size=12, chunk_overlap=3)
+
+    assert len(chunks) > 1
+    assert all(count_tokens(chunk.content) <= 12 for chunk in chunks)
+    assert "token-6" in chunks[1].content
+    assert "token-7" in chunks[1].content
+    assert "token-8" in chunks[1].content
+
+
+def test_token_counter_handles_chinese_identifiers_and_punctuation():
+    assert count_tokens("退款 ERROR-401，需要 trace_id。") == 8
 
 
 def test_chroma_dense_index_uses_injected_collection():

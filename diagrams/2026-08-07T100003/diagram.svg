@@ -1,0 +1,217 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1600" viewBox="0 0 1600 1600">
+  <defs>
+    <linearGradient id="headerGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#102A43"/>
+      <stop offset="1" stop-color="#243B68"/>
+    </linearGradient>
+    <linearGradient id="hubGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4338CA"/>
+      <stop offset="1" stop-color="#312E81"/>
+    </linearGradient>
+    <linearGradient id="serviceGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EEF2FF"/>
+      <stop offset="1" stop-color="#F8FAFC"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Canvas -->
+  <rect x="0" y="0" width="1600" height="1600" fill="#F7F2E8"/>
+
+  <!-- Header -->
+  <rect x="0" y="0" width="1600" height="96" fill="url(#headerGrad)"/>
+  <rect x="46" y="25" width="8" height="44" rx="4" fill="#2DD4BF"/>
+  <text x="72" y="48" font-family="Noto Sans SC, sans-serif" font-size="25" font-weight="700" fill="#FFFFFF">4.2 Multi-Agent 与有界执行</text>
+  <text x="72" y="73" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#C9D8E8">确定性路由 · 领域内规划 · 可测试边界 · 显式终止</text>
+  <rect x="1290" y="30" width="250" height="36" rx="18" fill="#173D5F" stroke="#5EEAD4" stroke-width="1"/>
+  <text x="1415" y="53" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#CCFBF1">Turn-level Orchestration</text>
+
+  <!-- 01 Deterministic orchestration -->
+  <text x="52" y="132" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#52667A">01  确定性编排入口</text>
+  <line x1="70" y1="205" x2="1530" y2="205" stroke="#CBD5E1" stroke-width="3"/>
+
+  <rect x="70" y="158" width="280" height="94" rx="20" fill="#FFFFFF" stroke="#9FB3C8" stroke-width="1.5"/>
+  <circle cx="104" cy="188" r="13" fill="#0F766E"/>
+  <path d="M97 188 L102 193 L112 181" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="132" y="185" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#243B53">DialogueState</text>
+  <rect x="128" y="204" width="190" height="27" rx="13" fill="#E6FFFA"/>
+  <text x="223" y="222" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#0F766E">active_intent + intents</text>
+
+  <polygon points="385,205 435,155 485,205 435,255" fill="url(#hubGrad)"/>
+  <text x="435" y="201" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">Router</text>
+  <text x="435" y="219" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#DDD6FE">确定性</text>
+
+  <rect x="520" y="165" width="235" height="80" rx="16" fill="#EEF2FF" stroke="#6366F1" stroke-width="1.5"/>
+  <text x="637" y="196" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#3730A3">route_intent / route_tasks</text>
+  <text x="637" y="221" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#596579">生成 goal → Agent 映射</text>
+
+  <path d="M795 169 L1045 169 L1045 241 L795 241 Z" fill="#FFFFFF" stroke="#0F766E" stroke-width="1.5"/>
+  <circle cx="826" cy="205" r="13" fill="#14B8A6"/>
+  <text x="826" y="210" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF">∪</text>
+  <text x="855" y="200" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#115E59">按 Agent 分组 goals</text>
+  <text x="855" y="224" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#52667A">去重执行，保持确定性顺序</text>
+
+  <rect x="1090" y="155" width="340" height="100" rx="24" fill="url(#hubGrad)"/>
+  <circle cx="1131" cy="205" r="22" fill="#FFFFFF" opacity="0.18"/>
+  <path d="M1121 205 L1129 213 L1144 196" fill="none" stroke="#FFFFFF" stroke-width="2.5"/>
+  <text x="1165" y="198" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">DomainAgentRuntime</text>
+  <text x="1165" y="225" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#E0E7FF">多 Agent 顺序执行 + 结果合并</text>
+
+  <polygon points="370,205 358,198 358,212" fill="#64748B"/>
+  <polygon points="505,205 493,198 493,212" fill="#64748B"/>
+  <polygon points="780,205 768,198 768,212" fill="#64748B"/>
+  <polygon points="1075,205 1063,198 1063,212" fill="#64748B"/>
+
+  <polyline points="1260,255 1260,282" fill="none" stroke="#D97706" stroke-width="2"/>
+  <polygon points="1260,292 1254,280 1266,280" fill="#D97706"/>
+  <rect x="1060" y="292" width="400" height="80" rx="17" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <circle cx="1094" cy="332" r="13" fill="#F59E0B"/>
+  <text x="1094" y="337" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">!</text>
+  <text x="1122" y="327" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#92400E">复合意图已接入主 /chat</text>
+  <text x="1122" y="351" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#9A5B16">同一 Agent 多 goal 只执行一次</text>
+
+  <!-- Branch split -->
+  <polyline points="1260,372 1260,410 290,410 290,458" fill="none" stroke="#4F46E5" stroke-width="2.5"/>
+  <polyline points="1260,372 1260,410 1040,410 1040,458" fill="none" stroke="#4F46E5" stroke-width="2.5"/>
+  <circle cx="1260" cy="410" r="6" fill="#4F46E5"/>
+  <polygon points="290,468 284,456 296,456" fill="#4F46E5"/>
+  <polygon points="1040,468 1034,456 1046,456" fill="#4F46E5"/>
+
+  <!-- 02A Knowledge branch -->
+  <text x="52" y="468" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#52667A">02A  知识分支：固定单次调用</text>
+  <path d="M70 500 L470 500 L510 540 L510 1140 L70 1140 Z" fill="#ECFDF5" stroke="#0F766E" stroke-width="2"/>
+  <polygon points="470,500 510,540 470,540" fill="#A7F3D0"/>
+  <circle cx="125" cy="568" r="28" fill="#0F766E"/>
+  <path d="M114 559 L136 559 L136 578 L114 578 Z M117 554 L133 554" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="170" y="563" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#115E59">KnowledgeAgent</text>
+  <text x="170" y="590" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#3F635F">非 ReAct 循环，路径稳定可预测</text>
+
+  <line x1="290" y1="620" x2="290" y2="681" stroke="#0F766E" stroke-width="2"/>
+  <polygon points="290,691 284,679 296,679" fill="#0F766E"/>
+  <rect x="115" y="691" width="350" height="108" rx="54" fill="#FFFFFF" stroke="#14B8A6" stroke-width="2"/>
+  <circle cx="160" cy="745" r="26" fill="#CCFBF1"/>
+  <path d="M150 745 C154 731 166 731 171 745 C166 759 154 759 150 745 Z" fill="none" stroke="#0F766E" stroke-width="2"/>
+  <circle cx="160" cy="745" r="4" fill="#0F766E"/>
+  <text x="201" y="739" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#134E4A">rag_search</text>
+  <text x="201" y="765" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#0F766E">mode = rerank</text>
+
+  <line x1="290" y1="799" x2="290" y2="881" stroke="#0F766E" stroke-width="2"/>
+  <polygon points="290,891 284,879 296,879" fill="#0F766E"/>
+  <rect x="135" y="891" width="310" height="70" rx="14" fill="#DDF7F2" stroke="#5EEAD4" stroke-width="1"/>
+  <text x="290" y="921" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#115E59">一次检索 → KnowledgeResult</text>
+  <text x="290" y="945" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#3F635F">结果直接参与最终合并</text>
+
+  <!-- 02B Shared service execution field -->
+  <text x="550" y="468" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#52667A">02B  服务分支：领域计划 + 共享有界执行器</text>
+  <path d="M550 516 Q550 500 566 500 L1514 500 Q1530 500 1530 516 L1530 1124 Q1530 1140 1514 1140 L566 1140 Q550 1140 550 1124 Z" fill="url(#serviceGrad)" stroke="#818CF8" stroke-width="2"/>
+  <path d="M550 516 Q550 500 566 500 L1514 500 Q1530 500 1530 516 L1530 682 L550 682 Z" fill="#E7EAFE"/>
+
+  <!-- Domain playbooks -->
+  <rect x="580" y="540" width="280" height="104" rx="18" fill="#FFFFFF" stroke="#6366F1" stroke-width="1.5"/>
+  <circle cx="617" cy="592" r="19" fill="#4F46E5"/>
+  <text x="617" y="598" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">O</text>
+  <text x="651" y="578" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#312E81">OrderAgent</text>
+  <rect x="650" y="593" width="174" height="24" rx="12" fill="#EEF2FF"/>
+  <text x="737" y="609" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#4338CA">query_order</text>
+
+  <rect x="875" y="540" width="300" height="104" rx="18" fill="#FFFFFF" stroke="#6366F1" stroke-width="1.5"/>
+  <circle cx="912" cy="592" r="19" fill="#4F46E5"/>
+  <text x="912" y="598" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">L</text>
+  <text x="946" y="578" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#312E81">LogisticsAgent</text>
+  <text x="946" y="609" font-family="Noto Sans SC, sans-serif" font-size="11" fill="#4338CA">query_order → track_package</text>
+
+  <path d="M1190 558 Q1190 540 1208 540 L1497 540 L1497 644 L1208 644 Q1190 644 1190 626 Z" fill="#FFFFFF" stroke="#D97706" stroke-width="1.5"/>
+  <circle cx="1227" cy="592" r="19" fill="#4F46E5"/>
+  <text x="1227" y="598" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">A</text>
+  <text x="1261" y="570" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#312E81">AfterSalesAgent</text>
+  <text x="1261" y="594" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#4338CA">退款校验 / 投诉与转人工工单</text>
+  <rect x="1261" y="605" width="115" height="20" rx="10" fill="#FEF3C7"/>
+  <text x="1318" y="619" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10" font-weight="700" fill="#92400E">PendingAction</text>
+  <text x="1385" y="619" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#92400E">→ create_refund / create_ticket</text>
+
+  <!-- Shared executor -->
+  <line x1="720" y1="644" x2="720" y2="704" stroke="#6366F1" stroke-width="2"/>
+  <line x1="1025" y1="644" x2="1025" y2="704" stroke="#6366F1" stroke-width="2"/>
+  <line x1="1345" y1="644" x2="1345" y2="704" stroke="#D97706" stroke-width="2"/>
+  <polyline points="720,704 720,725 808,725" fill="none" stroke="#6366F1" stroke-width="2"/>
+  <polyline points="1025,704 1025,687 1040,687 1040,704" fill="none" stroke="#6366F1" stroke-width="2"/>
+  <polyline points="1345,704 1345,725 1272,725" fill="none" stroke="#D97706" stroke-width="2"/>
+  <polygon points="818,725 806,719 806,731" fill="#6366F1"/>
+  <polygon points="1262,725 1274,719 1274,731" fill="#D97706"/>
+  <rect x="818" y="704" width="444" height="42" rx="21" fill="#312E81"/>
+  <text x="1040" y="731" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">共享 ServiceAgent 执行器 · MAX_STEPS = 4</text>
+
+  <!-- Bounded loop -->
+  <ellipse cx="690" cy="845" rx="105" ry="55" fill="#DDF7F2" stroke="#0F766E" stroke-width="2"/>
+  <text x="690" y="840" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#115E59">Observation</text>
+  <text x="690" y="864" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#3F635F">状态 + 工具结果</text>
+
+  <polygon points="882,790 1002,790 1034,845 1002,900 882,900 850,845" fill="#4F46E5"/>
+  <text x="942" y="840" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">next_action</text>
+  <text x="942" y="864" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#E0E7FF">领域代码决定下一步</text>
+
+  <rect x="1095" y="790" width="260" height="110" rx="26" fill="#FFFFFF" stroke="#4F46E5" stroke-width="2"/>
+  <circle cx="1140" cy="845" r="27" fill="#EEF2FF"/>
+  <path d="M1128 845 L1137 854 L1155 834 M1131 831 L1152 831 L1152 859 L1131 859 Z" fill="none" stroke="#4F46E5" stroke-width="2"/>
+  <text x="1180" y="838" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#312E81">ToolRegistry</text>
+  <text x="1180" y="864" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#596579">统一工具调用边界</text>
+
+  <polyline points="795,845 838,845" fill="none" stroke="#4F46E5" stroke-width="3"/>
+  <polygon points="848,845 836,839 836,851" fill="#4F46E5"/>
+  <polyline points="1034,845 1083,845" fill="none" stroke="#4F46E5" stroke-width="3"/>
+  <polygon points="1093,845 1081,839 1081,851" fill="#4F46E5"/>
+  <path d="M1355 845 C1450 845 1460 1005 1320 1005 L730 1005 C660 1005 645 930 665 900" fill="none" stroke="#0F766E" stroke-width="3"/>
+  <polygon points="670,892 660,901 673,905" fill="#0F766E"/>
+  <text x="1040" y="1029" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10.5" font-weight="600" fill="#0F766E">工具返回 Observation，继续下一步判断</text>
+
+  <!-- Loop exits -->
+  <polyline points="942,900 942,1085 810,1085" fill="none" stroke="#0F766E" stroke-width="2"/>
+  <polygon points="800,1085 812,1079 812,1091" fill="#0F766E"/>
+  <rect x="600" y="1063" width="200" height="44" rx="22" fill="#CCFBF1" stroke="#0F766E" stroke-width="1.5"/>
+  <circle cx="626" cy="1085" r="10" fill="#0F766E"/>
+  <path d="M622 1085 L625 1088 L631 1081" fill="none" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="712" y="1090" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" font-weight="700" fill="#115E59">None → finish</text>
+
+  <polyline points="1355,845 1435,845 1435,1085 1397,1085" fill="none" stroke="#DC2626" stroke-width="2"/>
+  <polygon points="1387,1085 1399,1079 1399,1091" fill="#DC2626"/>
+  <rect x="1165" y="1063" width="222" height="44" rx="22" fill="#FEE2E2" stroke="#DC2626" stroke-width="1.5"/>
+  <circle cx="1191" cy="1085" r="10" fill="#DC2626"/>
+  <path d="M1187 1081 L1195 1089 M1195 1081 L1187 1089" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="1282" y="1090" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" font-weight="700" fill="#991B1B">超限 max_steps_exceeded</text>
+
+  <!-- 03 Merge and response -->
+  <text x="52" y="1210" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#52667A">03  结果归并与响应</text>
+  <polyline points="290,1140 290,1310 580,1310" fill="none" stroke="#0F766E" stroke-width="2.5"/>
+  <polyline points="1040,1140 1040,1200 760,1200 760,1260" fill="none" stroke="#4F46E5" stroke-width="2.5"/>
+  <polygon points="590,1310 578,1304 578,1316" fill="#0F766E"/>
+  <polygon points="760,1270 754,1258 766,1258" fill="#4F46E5"/>
+
+  <path d="M590 1270 L820 1270 L860 1310 L820 1350 L590 1350 L550 1310 Z" fill="#0F766E"/>
+  <text x="705" y="1303" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="15" font-weight="700" fill="#FFFFFF">GoalEvaluator + Composer</text>
+  <text x="705" y="1328" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#CCFBF1">求值 completion_condition → 合并回复</text>
+
+  <line x1="860" y1="1310" x2="925" y2="1310" stroke="#0F766E" stroke-width="2.5"/>
+  <polygon points="935,1310 923,1304 923,1316" fill="#0F766E"/>
+  <rect x="936" y="1278" width="190" height="64" rx="32" fill="#FFFFFF" stroke="#0F766E" stroke-width="2"/>
+  <text x="1031" y="1304" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" font-weight="700" fill="#115E59">/chat response</text>
+  <text x="1031" y="1327" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="10" fill="#52667A">统一面向用户</text>
+
+  <!-- Core conclusion -->
+  <path d="M1180 1248 L1525 1248 L1525 1428 L1210 1428 L1180 1398 Z" fill="#102A43"/>
+  <polygon points="1180,1398 1210,1428 1210,1398" fill="#1E4B6F"/>
+  <rect x="1208" y="1280" width="7" height="108" rx="3" fill="#F59E0B"/>
+  <text x="1238" y="1295" font-family="Noto Sans SC, sans-serif" font-size="11" font-weight="700" fill="#FCD34D">核心结论</text>
+  <text x="1238" y="1340" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">GoalContract + 领域规划</text>
+  <text x="1238" y="1378" font-family="Noto Sans SC, sans-serif" font-size="13" fill="#D6E4F0">完成谓词、边界和终止均可测试</text>
+
+  <!-- Footer legend -->
+  <line x1="52" y1="1538" x2="1548" y2="1538" stroke="#D4C9B5" stroke-width="1"/>
+  <circle cx="64" cy="1570" r="6" fill="#4F46E5"/>
+  <text x="78" y="1574" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#52667A">执行 / 编排</text>
+  <circle cx="176" cy="1570" r="6" fill="#0F766E"/>
+  <text x="200" y="1574" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#52667A">数据 / 结果</text>
+  <circle cx="288" cy="1570" r="6" fill="#F59E0B"/>
+  <text x="302" y="1574" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#52667A">确认门禁</text>
+  <circle cx="394" cy="1570" r="6" fill="#DC2626"/>
+  <text x="408" y="1574" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#52667A">失败终止</text>
+  <text x="1548" y="1574" text-anchor="end" font-family="Noto Sans SC, sans-serif" font-size="10.5" fill="#7C6F5D">GGBot · Multi-Agent Runtime</text>
+</svg>

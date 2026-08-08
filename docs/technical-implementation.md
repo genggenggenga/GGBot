@@ -2,12 +2,12 @@
 
 > Turn-level Agent Runtime · Standard MCP · Hybrid RAG · Persistent Memory
 >
-> 技术说明与[飞书文档](https://bytedance.sg.larkoffice.com/docx/Ix4bdrw7Moqennx7kINloQdbgMc) revision 52 对齐。
+> 技术说明与[飞书更新副本](https://bytedance.sg.larkoffice.com/docx/KsZ7dMeVUotli3xg2AilbhaCgeg) revision 17 对齐；原文档保持不变，本次审计源为原文 revision 54。
 
 | 项目     | 内容                      | 项目     | 内容                              |
 | -------- | ------------------------- | -------- | --------------------------------- |
-| 当前版本 | `feat-v1 / c80e5fb + P0 fixes` | 核心场景 | 退款申请三轮闭环                  |
-| 验证结果 | 277 tests passed · 6.17s       | 技术主线 | 显式状态机 + 多 Agent + MCP + RAG |
+| 当前版本 | `feat-v1 / 7d7397a`          | 核心场景 | 退款申请与人工工单确认闭环        |
+| 验证结果 | 277 passed · 1 warning       | 技术主线 | 显式状态机 + 多 Agent + MCP + RAG |
 
 > **项目定位**
 >
@@ -25,9 +25,20 @@
 | 记忆系统    | Redis 工作记忆与状态，Chroma 情景记忆与画像            | 分层存储       |
 | 质量体系    | Trace、Prometheus、277 个测试、50 条离线评测           | 主链路监控已接入 |
 
+### 本次实现更新摘要
+
+| 变化方向 | 当前实现 | 文档调整 |
+| --- | --- | --- |
+| 业务动作安全 | 退货/取消等未实现动作 fail closed；订单、物流、退款和工单使用强类型业务输出 | 补充能力边界、业务失败与系统失败的区别 |
+| 售后闭环 | 投诉与转人工通过 `create_ticket` 进入确认、恢复和幂等链路 | Multi-Agent 图增加退款/工单双分支 |
+| 复合意图 | NLU 输出 `intents`，Runtime 按 Agent 分组 goal，并执行 completion condition | 更新 NLU、Router 和结果合并说明 |
+| MCP 韧性 | MCP Adapter 已接入参数校验、超时、熔断和调用统计；WRITE 成功后清理确认状态 | 移除“MCP Adapter 未接监控”的旧结论 |
+| RAG 一致性 | Chroma collection 成为 canonical chunk store，保留完整引用元数据；Dense/RRF/Reranker 使用独立阈值 | 重绘索引与证据门控图 |
+| 异步与可观测性 | 同步 Redis/Chroma/Retriever 调用移出事件循环；后台任务受跟踪并在关停时 drain | 补充 off-loop、任务生命周期和主链路监控 |
+
 ### 系统架构
 
-![GGBot 系统架构](../diagrams/2026-08-05T000306/diagram.png)
+![GGBot 系统架构](../diagrams/2026-08-07T100001/diagram.png)
 
 **主运行时。** `POST /chat` 已切换到 `CustomerAgentRuntime → DialogueStateTracker → TurnEngine → DomainAgentRuntime → ToolRegistry`。FAQ 使用固定 RAG 路径；订单、物流和退款使用有界 ServiceAgent；写操作在用户确认前不会执行。
 
@@ -56,7 +67,7 @@
 2. **结构化理解。** 正则 fast-track 优先识别意图、订单号、物流号、确认、拒绝和槽位纠正；信号不足时最多调用一次 LLM，并用 Pydantic 校验输出。
 3. **更新业务状态。** DialogueStateTracker 以纯 Reducer 方式合并旧状态与本轮 UnderstandingResult，计算 required_slots 和 missing_slots。
 4. **驱动执行状态。** TurnEngine 校验状态边、执行 handler，并在每一步后把 DialogueState 持久化到 Redis。
-5. **路由领域 Agent。** Router 根据 active_intent 确定目标 Agent，不增加额外 LLM 调用。
+5. **路由领域 Agent。** Router 根据 active_intent 与本轮 intents 生成 goal → Agent 映射，按 Agent 去重，不增加额外 LLM 调用。
 6. **调用工具并返回。** ToolRegistry 检查工具存在性、Agent 白名单和写操作确认状态；API 返回结果、状态、缺失槽位、引用和 trace_id。
 
 ### TurnEngine 状态路径
@@ -120,7 +131,7 @@ while state not in terminal_states:
 
 **图解阅读方式。** 沿主箭头查看自然语言如何先经过规则或 LLM 形成强类型理解结果，再由 DST 按冲突规则合并为可持久化 DialogueState；图中的琥珀色节点对应下文重点解释的校验与状态治理规则。
 
-![NLU 与 Dialogue State Tracking](../diagrams/2026-08-05T020101/diagram.png)
+![NLU 与 Dialogue State Tracking](../diagrams/2026-08-07T100002/diagram.png)
 
 | 机制              | 实现方式                                                                    |
 | ----------------- | --------------------------------------------------------------------------- |
@@ -133,24 +144,28 @@ while state not in terminal_states:
 
 **fast-track 不是简单兜底，而是优先通道。** 订单号、运单号、确认和拒绝等高确定性信息使用正则提取；命中意图与槽位时置信度达到 0.9 以上，直接跳过远程 LLM。若当前已经存在 active_intent，而本轮只补充槽位或纠正槽位，识别器会保留原目标，避免“订单号 ORD-1001”被误切换成普通订单查询。
 
+**用户行为识别依赖确认上下文。** confirm / reject 只在 `confirmation_status=PENDING` 时生效；显式 correction 的优先级高于 reject，避免“不对，是 ORD-1002”被误判为取消动作。配送时效、费用等通用问题进入知识查询，只有具体订单物流查询才要求 `order_id`。
+
 **LLM 只负责规则无法覆盖的语义。** Prompt 中包含可用意图、各意图必填槽位、当前 DialogueState 和少量示例，要求仅返回 JSON。输出会经历代码块清理、JSON 截取、字段类型归一化和 Pydantic 构造；空响应、无效 JSON、未知意图或调用异常都会回退到 `make_fallback_understanding()`，不会把异常传播到主链路。
 
 **DST 负责冲突处理。** 普通新值不能静默覆盖已有槽位，只有 corrected_slots 明确标记后才允许改写。发生 UserAct.SWITCH 时，状态机会清空 pending_action，并仅保留 order_id、tracking_no 等允许跨意图复用的槽位。工具 Observation 可以补齐缺失字段，但不会覆盖用户明确提供的值。
 
 **IntentSchema 是业务契约。** 每个意图声明 required_slots、allowed_agents 和 completion_condition。DST 用它计算 missing_slots，Router 用它确定允许的 Agent，评测也可据此判断目标是否完成，避免意图、槽位和路由规则散落在 Prompt 中。
 
+**复合意图从理解结果进入执行计划。** 规则与 LLM 两条路径都可以输出去重后的 `intents`。如果本轮不是显式 SWITCH，Runtime 会保护已经在处理的 active_intent；否则把多个目标交给领域 Runtime 分组执行，避免同一 Agent 因多个 goal 被重复调用。
+
 ### 4.2 Multi-Agent 与有界执行
 
 **图解阅读方式。** 先看 Router 如何把业务意图交给领域 Agent，再看 ServiceAgent 的有界 Observation/Action 循环；KnowledgeAgent 的固定检索路径和 AfterSalesAgent 的确认分支在图中被单独展开。
 
-![Multi-Agent 与有界执行](../diagrams/2026-08-05T020102/diagram.png)
+![Multi-Agent 与有界执行](../diagrams/2026-08-07T100003/diagram.png)
 
 | Agent           | 职责                 | 核心工具                                                 |
 | --------------- | -------------------- | -------------------------------------------------------- |
 | KnowledgeAgent  | 政策与 FAQ           | `rag_search`，固定一次检索                               |
 | OrderAgent      | 订单事实             | `query_order`                                            |
 | LogisticsAgent  | 订单与物流轨迹       | `query_order → track_package`                            |
-| AfterSalesAgent | 退款资格与售后写操作 | `query_order → check_refund_eligibility → create_refund` |
+| AfterSalesAgent | 退款与人工工单写操作 | `create_refund` / `create_ticket`，均经过确认门禁 |
 
 Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默认最多 4 步。KnowledgeAgent 不进入 ReAct 循环，避免 FAQ 场景产生无界工具规划。
 
@@ -160,13 +175,15 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **KnowledgeAgent 单独设计。** 知识问答不需要多步业务动作，因此只调用一次 `rag_search(mode="rerank")`。返回无证据或 answered=false 时明确拒答；有证据时使用首个 chunk 生成响应并附带 Citation。它不进入 ServiceAgent 循环，从架构上限制 FAQ 工具调用成本。
 
-**DomainAgentRuntime 支持复合任务。** Router 的 `route_tasks()` 可以把多个意图映射为去重后的 Agent 列表，Runtime 按顺序执行并由 ResponseComposer 合并结果。当前 `/chat` 主路径通常只有一个 active_intent，因此这项能力已具备代码基础，但复合意图识别和并行执行还没有完整接入新主链路。
+**售后动作按能力显式分流。** `refund_request` 进入退款资格与确认链路；`complaint` / `escalation` 生成 `create_ticket` PendingAction，并在确认后创建人工工单；退货、取消订单等尚未实现的动作直接 fail closed，不会复用退款工具。
+
+**DomainAgentRuntime 已接入复合任务。** Router 将每个 goal 映射到 Agent，再按 Agent 分组去重；多个 Agent 按确定性顺序执行。`GoalCompletionEvaluator` 根据 IntentSchema 的 completion condition 检查引用、工具 Observation 或工单结果，只有满足完成谓词的 goal 才进入 `completed_goals`，最后由 ResponseComposer 合并响应。
 
 ### 4.3 MCP 与工具安全边界
 
 **图解阅读方式。** 从 Agent 请求开始，依次核对 ToolRegistry 的四道安全检查、MCP 的发现与调用协议，以及 Server 对写操作的幂等保护；红色支路表示调用在产生副作用前被拒绝。
 
-![MCP 与工具安全边界](../diagrams/2026-08-05T020103/diagram.png)
+![MCP 与工具安全边界](../diagrams/2026-08-07T100004/diagram.png)
 
 应用通过官方 `mcp` Python SDK 以 stdio 启动 `mcp_server.customer_service_server`，完成 initialize、list_tools 和动态注册。MCPToolAdapter 将服务端定义转换为统一 ToolSpec / ToolResult。
 
@@ -176,7 +193,7 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 | 读写分类     | `create_refund` 和 `create_ticket` 被标记为 WRITE          |
 | 确认门禁     | WRITE 工具必须携带已确认的 action_id，否则直接拒绝执行     |
 | 幂等保护     | MCP Server 按 action_id 缓存写入结果，重放不会重复创建     |
-| 韧性策略     | 本地 Adapter 支持参数校验、超时、TTL 缓存、熔断和 fallback |
+| 韧性策略     | Local Adapter 支持缓存/fallback；Local 与 MCP Adapter 均支持校验、超时、熔断和统计 |
 
 **工具契约由 ToolSpec 描述。** 每个工具包含 name、description、input_schema、output_schema、tool_type、timeout_s、cache_ttl 和 supports_rerank。调用前使用轻量 JSON Schema 规则检查 required、基础类型和 enum；失败时返回结构化 ToolResult，而不是直接抛出到 Agent。
 
@@ -184,31 +201,31 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **ToolRegistry 是统一治理入口。** Agent 调用工具时依次检查：工具是否注册、工具是否在 Agent 白名单、WRITE 工具是否携带 action_id、action_id 是否已确认。只有四项全部通过才会委托 Adapter 执行。白名单在 Agent 初始化时注册，因此越权调用即使工具本身存在也会被拒绝。
 
-**LocalToolAdapter 提供执行韧性。** 调用链依次经过缓存命中、熔断检查、参数校验、asyncio 超时、统计更新和 fallback。熔断器包含 CLOSED、OPEN、HALF_OPEN 三态；达到连续失败阈值后拒绝新调用，恢复窗口到期后放行探测请求。缓存键由工具名、参数和 rerank_top_k 的稳定序列化哈希生成。
+**两类 Adapter 共享基础韧性。** LocalToolAdapter 提供 TTL 缓存、fallback、熔断与统计；MCPToolAdapter 提供参数校验、asyncio 超时、CLOSED/OPEN/HALF_OPEN 熔断和 ToolStats。主监控直接读取 ToolRegistry 聚合结果，远端 MCP 工具失败不再游离于监控之外。
 
-**MCPToolAdapter 当前更轻量。** 它已经实现参数校验、超时和结构化错误，但没有复用 LocalToolAdapter 的缓存、熔断和完整统计。因此文档中将“工具韧性”区分为 Registry/Local Adapter 已实现能力与 MCP Adapter 待收敛能力，避免把两条执行路径混为一谈。
+**确认状态在成功写入后释放。** ToolRegistry 委托 WRITE 工具执行成功后调用 `ConfirmationGate.complete(action_id)`，同时清理 pending 与 confirmed 集合，避免确认令牌在进程内无限累积。业务层仍以强类型输出判断 `created/found`，协议成功不等同于业务成功。
 
-**Mock Server 保证演示可重复。** 订单、物流、退款和工单数据存放在标准 MCP Server 内；create_refund 和 create_ticket 以 action_id 建立进程内幂等映射。该实现用于验证协议、状态机和确认链路，替换为真实业务 Server 时，Agent 与 ToolRegistry 无需修改调用协议。
+**Mock Server 保证演示可重复。** 订单、物流、退款和工单数据存放在标准 MCP Server 内；create_refund 和 create_ticket 以 action_id 建立进程内幂等映射，并校验 payload hash。相同 action_id 携带不同 payload 时返回 `idempotency_conflict`，不会错误复用旧结果。该映射尚未持久化，替换真实业务 Server 时需要数据库唯一约束或 Redis 原子写。
 
 ### 4.4 Hybrid RAG
 
 **图解阅读方式。** 上方泳道展示文档如何保留结构并同步建立 Dense/BM25 索引，下方泳道展示在线查询如何双路召回、按排名融合、重排，并在阈值判断后生成引用或拒答。
 
-![Hybrid RAG](../diagrams/2026-08-05T020104/diagram.png)
+![Hybrid RAG](../diagrams/2026-08-07T100005/diagram.png)
 
 `Loader → Structure-aware Chunking → Dense + BM25 → RRF → Cross-Encoder → Citation`
 
 | 阶段       | 实现                                                                    |
 | ---------- | ----------------------------------------------------------------------- |
 | 文档解析   | 支持 TXT、Markdown、PDF 和 JSON；保留 Markdown 标题路径与 PDF 页码      |
-| 切片       | 默认 chunk_size=500、overlap=80，使用内容哈希生成 chunk_id 与 parent_id |
+| 切片       | 模型无关 token 预算，默认 chunk_size=500、overlap=80；参数可通过环境变量调整，并使用内容哈希生成 chunk_id 与 parent_id |
 | 双路召回   | ChromaDB + BGE Dense，与进程内 BM25 并行检索                            |
 | 融合与重排 | RRF 默认 k=60，可选 `BAAI/bge-reranker-v2-m3`                           |
 | 引用与拒答 | 返回 source、title、section、page、chunk_id；无相关证据时拒绝回答       |
 
-**导入阶段保持结构信息。** `load_document()` 按文件类型分发：TXT 作为单节；Markdown 按标题层级构造 section path；PDF 逐页提取并记录 page。`chunk_sections()` 使用段落、换行、中文标点和空格递归切分，最后应用 overlap，避免简单定长截断破坏全部语义边界。
+**导入阶段保持结构信息。** `load_document()` 按文件类型分发：TXT 作为单节；Markdown 按标题层级构造 section path；PDF 逐页提取并记录 page。`chunk_sections()` 使用段落、换行、中文标点和空格递归切分，再按模型无关 token 单元执行硬预算与 overlap，避免简单定长截断破坏全部语义边界。`RAG_CHUNK_SIZE_TOKENS` 与 `RAG_CHUNK_OVERLAP_TOKENS` 只影响新导入或重新索引的文档。
 
-**Dense 与 Sparse 索引同步更新。** KnowledgeRuntime 启动时从原知识库 collection 还原 DocumentChunk，再构建 BM25 索引；启用本地模型时创建独立 BGE Dense collection 并写入相同 chunk。后续 add_documents / add_file 会同时更新知识库、Dense 索引和 BM25 全量语料，避免新文档只进入单一路召回。
+**Canonical chunk store 消除双重索引漂移。** KnowledgeBase 的 Chroma collection 保存统一 chunk_id、正文以及 source / title / section / page / metadata。KnowledgeRuntime 直接复用这个 collection 做 Dense 检索，并从同一批 DocumentChunk 构建 BM25；导入时优先调用 `add_chunks()`，不再创建第二套 Dense collection 或在启动时重复 Embedding。
 
 **Dense 负责语义相似，BM25 负责精确词项。** Dense 使用 Chroma cosine distance 转换为相似度，适合语义改写；BM25 使用英文 token 与中文单字 token，适合订单规则名、错误码和关键词命中。两路各自取 candidate_k 后进入 RRF，不直接比较两种不可同量纲的原始分数。
 
@@ -216,15 +233,15 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **Cross-Encoder 只处理融合候选。** 启用 reranker 时，将 query 与候选 chunk 组成 pair 批量打分，用 rerank_score 覆盖最终排序分数，再截取 top_k。这样把计算量限制在候选集合，而不是对整个知识库做交叉编码。
 
-**Citation 来自检索元数据。** 最终结果为每个命中生成 Citation，包含 citation_id、chunk_id、source、title、section 和 page。KnowledgeAgent 响应中的 [1] 与返回 citations 同步输出。若没有候选或最高分低于 relevance_threshold，则返回 answered=false 和 no_relevant_evidence。
+**Citation 来自检索元数据。** 最终结果为每个命中生成 Citation，包含 citation_id、chunk_id、source、title、section 和 page。KnowledgeAgent 响应中的 [1] 与返回 citations 同步输出。Dense-only、RRF 和 Reranker 分别使用 `dense_threshold`、`rrf_threshold` 和 `rerank_threshold`，不再用同一个数值比较不同量纲的分数。
 
-**当前效果结论保持克制。** 默认 relevance_threshold 为 0，需要在真实数据上校准；本地确定性评测中的 Dense 和 Hybrid 指标相同，FakeReranker 还降低了 MRR。因此代码链路已经实现，但 BM25 和重排是否带来效果增益仍需真实模型与更有区分度的数据集验证。
+**当前效果结论保持克制。** 三类阈值已有非零默认值，但仍需要真实 no-answer 数据校准；本地确定性评测中的 Dense 和 Hybrid 指标相同，FakeReranker 还降低了 MRR。因此代码链路与拒答机制已经实现，但 BM25 和重排是否带来效果增益仍需真实模型与更有区分度的数据集验证。
 
 ### 4.5 记忆与持久化
 
 **图解阅读方式。** 以 MemoryContext 装配为中心，向外查看结构化状态、工作记忆、情景记忆和用户画像四条读写链路；不同颜色同时表示存储层级和写入门控。
 
-![记忆与持久化](../diagrams/2026-08-05T020105/diagram.png)
+![记忆与持久化](../diagrams/2026-08-07T100006/diagram.png)
 
 | 数据          | 存储       | 策略                                           |
 | ------------- | ---------- | ---------------------------------------------- |
@@ -243,12 +260,16 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **上下文装配顺序固定。** MemoryContext 将 Skills、DialogueState、最近消息、会话摘要、相关历史、用户画像和 Observation 分区输出。不同数据源保留标签与边界，使下游 Agent 能区分“用户刚说的话”“系统确认的状态”和“语义检索到的历史”。
 
+**同步存储调用不阻塞事件循环。** `_backend_call()` 识别异步客户端；对于同步 Redis / Chroma 方法统一使用 `asyncio.to_thread()`。RAG 工具和 `/search` 也把同步 Retriever 查询移出事件循环，避免单次向量检索阻塞并发请求。
+
+**后台记忆任务有完整生命周期。** 每轮消息写入后同步触发稳定偏好画像更新；任务完成或转人工时，情景记忆通过 `_spawn_background_task()` 登记。任务异常会进入日志，应用关停时 `_drain_background_tasks()` 先等待、再取消超时任务，降低无跟踪 `create_task()` 导致的数据丢失。
+
 ## 5. 可观测性与质量验证
 
 | Agent Trace                                                                   | 在线监控                                                          |
 | ----------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | 记录理解摘要、Agent 结果、工具名、状态路径和延迟                              | 采集 Agent / Tool 成功率和延迟，使用滑动窗口 Z-score 检测异常     |
-| 主动移除用户原文、完整 Prompt、查询内容和隐藏推理，仅保留截断后的公开观察摘要 | 支持 Prometheus、Webhook 和路由降权；新 ToolRegistry 尚未完整接入 |
+| 顶层事件与 Observation preview 都使用字段 allowlist，不保存用户原文、Prompt 或隐藏推理 | CustomerAgentRuntime 与 ToolRegistry 统计已接入 Prometheus、Webhook 和异常检测 |
 
 ### Trace 与在线监控实现
 
@@ -287,22 +308,24 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 消融会在 dense、hybrid、rerank 三种模式下重复执行同一批样本。当前 FakeDenseIndex 依赖 token overlap，FakeReranker 依赖稳定哈希，因此结果适合做代码回归，不等价于 BGE 与 Cross-Encoder 的真实离线效果。另一个 legacy EndToEndEvaluator 支持 LLM-as-Judge，但受模型波动和调用成本影响，不作为当前确定性报告的依据。
 
-全量 pytest 覆盖状态转移、跨轮恢复、确认门禁、MCP initialize/list/call、退款与工单幂等、RAG Loader/索引/融合、记忆压缩与画像门控、主链路监控、后台任务 drain、Trace allowlist 和 API 回归。当前验证结果为 277 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
+Chunking 另有独立黄金评测集 `data/eval/rag_chunking_cases.json`。`evaluation/chunking_eval.py` 实际执行 `load_document → chunk_sections → BM25Index`，检查 Retrieval Hit Rate、MRR、证据完整率、Section 准确率和 token 预算违规；该评测不使用 FakeDense 或 FakeReranker，也不代表真实向量模型效果。
+
+全量 pytest 覆盖状态转移、跨轮恢复、确认门禁、MCP initialize/list/call、退款与工单幂等、RAG Loader/索引/融合、记忆压缩与画像门控、主链路监控、后台任务 drain、Trace allowlist 和 API 回归。当前验证结果为 282 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
 
 ## 6. API 与部署形态
 
 | 领域 | 接口                                                 | 用途                            |
 | ---- | ---------------------------------------------------- | ------------------------------- |
-| 对话 | `POST /chat`<br>`GET /traces/{trace_id}`             | 执行主链路并查询公开 Trace      |
+| 对话 | `POST /chat`<br>`POST /search`<br>`GET /traces/{trace_id}` | 执行主链路、统一检索并查询公开 Trace |
 | 知识 | `POST /knowledge/add`<br>`POST /knowledge/upload`    | 导入文本、Markdown、PDF 或 JSON |
 | 运营 | `GET /skills`<br>`POST /skills/reload`               | 查看和热加载业务 Skill          |
-| 质量 | `POST /eval/run`<br>`GET /monitor`<br>`GET /metrics` | 评测、监控与 Prometheus 指标    |
+| 质量 | `POST /eval/run`<br>`GET /health`<br>`GET /monitor`<br>`GET /metrics` | 就绪检查、评测、监控与指标 |
 
 **部署栈。** Python 3.12 + FastAPI/Uvicorn + Redis 7 + ChromaDB 0.5.23 + Prometheus + Nginx。Dockerfile 使用多阶段构建和非 root 用户；Docker Compose 配置健康检查、持久卷和服务依赖。
 
 ### 应用启动顺序与配置
 
-lifespan 启动时首先校验 `ANTHROPIC_API_KEY`，读取模型、base_url、Skills 目录和 Redis/Chroma 地址。随后 SkillManager 扫描 SKILL.md、JSON、Markdown 或 TXT 文件，把匹配的业务规则限制在最大 Prompt 字符数内。旧 AgentOrchestrator 会直接消费 Skill Prompt；新领域 Agent 目前主要通过 agent_context 透传，实际动作仍由确定性代码决定。
+lifespan 启动时首先校验 `ANTHROPIC_API_KEY`，读取模型、base_url、Skills 目录和 Redis/Chroma 地址。随后 SkillManager 扫描 SKILL.md、JSON、Markdown 或 TXT 文件，把匹配的业务规则限制在最大 Prompt 字符数内。主运行时把受控的 Skills、摘要、相关历史和画像片段加入 KnowledgeAgent 检索 query；ServiceAgent 的业务动作仍由确定性领域代码决定。旧 AgentOrchestrator 只在 `ENABLE_LEGACY_EVAL=true` 时初始化。
 
 Redis 同时服务 DialogueState 与工作记忆，但使用不同 key 空间；ChromaDB 优先连接独立服务，失败后回退本地 PersistentClient。KnowledgeBase 为空时写入演示知识，KnowledgeRuntime 再基于 collection 构建 Dense/BM25/Reranker 链路。若启用本地 BGE 模型，首次启动需要准备模型缓存。
 
@@ -313,9 +336,14 @@ MCPClient 使用当前 Python 解释器拉起 `python -m mcp_server.customer_ser
 | `ANTHROPIC_MODEL / BASE_URL` | 选择结构化 NLU、摘要和 legacy Agent 使用的模型与兼容端点 |
 | `REDIS_URL`                  | DialogueState、工作记忆和会话摘要连接地址                |
 | `CHROMA_HOST / CHROMA_PORT`  | 知识库、情景记忆和用户画像的 ChromaDB 服务地址           |
-| `RAG_LOCAL_MODELS_ENABLED`   | 控制是否启用本地 BGE Embedding 与 Cross-Encoder          |
-| `RAG_RELEVANCE_THRESHOLD`    | 控制无相关证据时的拒答阈值                               |
-| `GGBOT_SKILLS_DIR`        | 业务 Skill 的扫描目录，支持运行时 reload                 |
+| `RAG_EMBEDDING_PROVIDER`     | 选择 `api / local / off` 检索模型策略                     |
+| `RAG_DENSE_THRESHOLD`        | Dense-only 模式的证据阈值                                |
+| `RAG_RRF_THRESHOLD`          | Hybrid RRF 模式的证据阈值                                |
+| `RAG_RERANK_THRESHOLD`       | Cross-Encoder 重排后的证据阈值                           |
+| `RAG_CHUNK_SIZE_TOKENS`      | 新导入文档的最大 chunk token 预算                        |
+| `RAG_CHUNK_OVERLAP_TOKENS`   | 新导入文档的相邻 chunk 重叠 token 预算                   |
+| `GGBOT_SKILLS_DIR`           | 业务 Skill 的扫描目录，支持运行时 reload                 |
+| `ENABLE_LEGACY_EVAL`         | 仅在显式需要时初始化旧 LLM evaluator                     |
 
 Docker Compose 将 Redis、ChromaDB、Prometheus、GGBot 和 Nginx 放在同一网络内，通过服务健康检查控制启动依赖。Redis 开启 AOF，Chroma 和 Prometheus 使用持久卷；应用容器以非 root 用户运行，并把知识数据、评测报告、Skills 和日志映射到宿主机目录。
 
@@ -327,18 +355,19 @@ export ANTHROPIC_API_KEY=your_key
 .venv/bin/python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 .venv/bin/python -m pytest -q
 .venv/bin/python -m evaluation.local_eval_runner
+.venv/bin/python -m evaluation.chunking_eval
 ```
 
 ## 7. 当前限制与演进优先级
 
 | 优先级 | 方向              | 目标                                                               |
 | ------ | ----------------- | ------------------------------------------------------------------ |
-| **P0** | 引用忠实度闭环    | 补充真实知识证据、引用支持标注和 grounded 判定                     |
-| **P0** | 工具参数准确率    | 覆盖缺参、纠正、跨轮继承和 action_id 构造                          |
-| **P1** | 验证主链路上下文收益 | 评估 Skills、摘要、历史和画像对真实问答质量的增益 |
-| **P1** | 验证 Hybrid 收益  | 使用更有区分度的数据集和真实模型重新做消融                         |
-| **P2** | 上下文效果验证     | 使用真实问题集验证 Skills、摘要、历史和画像的实际增益               |
-| **P2** | 生产工程化        | 补齐鉴权、审计、限流、持久 Trace、真实订单系统和压测               |
+| **P0** | 真实效果基线 | 使用真实 Embedding / Reranker、no-answer 与引用支持标注重新评测 |
+| **P0** | 真实业务 E2E | 验证缺参、纠正、复合意图、action_id 与业务拒绝全路径 |
+| **P1** | 持久副作用安全 | 将确认和幂等迁移到数据库唯一约束或 Redis 原子写 |
+| **P1** | PolicyResolver | 让 Skills 以结构化策略影响允许动作，而不只进入 RAG query |
+| **P2** | 可部署性 | 接入真实业务 Gateway、持久 Trace、审计、限流与压测 |
+| **发布阻断** | 身份与资源授权 | 对外部署前必须补齐认证、订单归属校验和最小权限 |
 
 ---
 

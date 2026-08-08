@@ -1,0 +1,121 @@
+{
+  "description": "GGBot Chunking 黄金评测集：使用客服政策原文验证解析、切片、证据完整性和 BM25 可检索性。",
+  "documents": [
+    {
+      "doc_id": "refund-policy-v2",
+      "filename": "refund_policy_v2.md",
+      "content": "# 售后政策\n\n## 无理由退款\n\n用户在购买后 7 天内可以申请无理由退款。退款申请提交后，系统会在 1-3 个工作日内审核。审核通过后，款项将在 5-7 个工作日内退回原支付账户。\n\n## 退货运费\n\n商品已经发货时，需要先完成退货流程。商品质量问题产生的退货运费由商家承担；其他原因产生的退货运费由用户承担。\n\n## 退款状态\n\n用户可以使用退款申请编号查询审核状态。审核失败时，系统需要展示失败原因和补充材料要求。"
+    },
+    {
+      "doc_id": "delivery-guide",
+      "filename": "delivery_guide.md",
+      "content": "# 配送服务\n\n## 配送时效\n\n标准配送预计 3-5 个工作日送达，加急配送预计 1-2 个工作日送达。偏远地区可能需要额外 2-3 天。\n\n## 地址修改\n\n如需修改收货地址，请在订单发货前联系客服。订单发货后不能直接修改地址，需要由物流客服判断是否可以转寄。\n\n## 物流异常\n\n订单显示已发货但超过 7 天未收到时，可以联系客服申请查件。物流信息通常在发货后 24 小时内更新。"
+    },
+    {
+      "doc_id": "account-security",
+      "filename": "account_security.md",
+      "content": "# 账户安全\n\n## 密码重置\n\n忘记密码时，可以通过绑定的手机号或邮箱重置。客服人员不会索要用户密码或短信验证码。\n\n## 异常登录\n\n发现账户异常登录时，系统会自动锁定账户并发送安全通知。用户完成身份核验后可以解除锁定。\n\n## 两步验证\n\n用户可以在安全设置中开启两步验证，提高账户安全性。"
+    },
+    {
+      "doc_id": "technical-troubleshooting",
+      "filename": "technical_troubleshooting.md",
+      "content": "# 技术故障排查\n\n## 登录失败\n\n登录失败并出现 ERROR-401 时，表示认证失败。请检查用户名和密码，必要时通过绑定邮箱重置密码。\n\n## 服务端错误\n\n出现 HTTP 500 服务器错误时，请稍后重试。如果持续出现，需要记录请求时间和 trace_id 后联系技术支持。\n\n## 页面加载\n\n页面加载缓慢时，先检查网络连接，再尝试切换 WiFi 或移动数据。"
+    },
+    {
+      "doc_id": "membership-points",
+      "filename": "membership_points.md",
+      "content": "# 会员与积分\n\n## 积分抵扣\n\n每消费 1 元累积 1 积分，100 积分可以抵扣 1 元。积分有效期为 1 年，过期后自动清零。\n\n## 会员等级\n\n银卡会员需要累计消费 1000 元，享受 95 折优惠；金卡会员需要累计消费 5000 元，享受 9 折优惠。\n\n## 生日权益\n\n会员生日当月消费可以获得双倍积分。"
+    },
+    {
+      "doc_id": "payment-errors",
+      "filename": "payment_errors.txt",
+      "content": "银行卡支付失败时，请先确认余额充足并检查银行卡是否开通网上支付功能。错误码 PAY-LIMIT 表示超过单笔支付限额，用户需要降低支付金额或联系发卡银行。错误码 PAY-RISK 表示交易触发风险控制，客服不能绕过风控，需要引导用户完成身份核验。"
+    }
+  ],
+  "cases": [
+    {
+      "id": "refund-window",
+      "query": "无理由退款可以在购买后几天内申请",
+      "relevant_doc_id": "refund-policy-v2",
+      "expected_text": "用户在购买后 7 天内可以申请无理由退款",
+      "expected_section": "售后政策 > 无理由退款"
+    },
+    {
+      "id": "refund-review-time",
+      "query": "退款审核需要几个工作日",
+      "relevant_doc_id": "refund-policy-v2",
+      "expected_text": "系统会在 1-3 个工作日内审核",
+      "expected_section": "售后政策 > 无理由退款"
+    },
+    {
+      "id": "return-shipping-fee",
+      "query": "质量问题退货的运费由谁承担",
+      "relevant_doc_id": "refund-policy-v2",
+      "expected_text": "商品质量问题产生的退货运费由商家承担",
+      "expected_section": "售后政策 > 退货运费"
+    },
+    {
+      "id": "remote-delivery",
+      "query": "偏远地区配送会额外延迟多久",
+      "relevant_doc_id": "delivery-guide",
+      "expected_text": "偏远地区可能需要额外 2-3 天",
+      "expected_section": "配送服务 > 配送时效"
+    },
+    {
+      "id": "change-address",
+      "query": "订单发货后还能直接修改收货地址吗",
+      "relevant_doc_id": "delivery-guide",
+      "expected_text": "订单发货后不能直接修改地址",
+      "expected_section": "配送服务 > 地址修改"
+    },
+    {
+      "id": "account-lock",
+      "query": "账户异常登录后系统会怎么处理",
+      "relevant_doc_id": "account-security",
+      "expected_text": "系统会自动锁定账户并发送安全通知",
+      "expected_section": "账户安全 > 异常登录"
+    },
+    {
+      "id": "two-factor",
+      "query": "怎样提高账户登录安全性",
+      "relevant_doc_id": "account-security",
+      "expected_text": "用户可以在安全设置中开启两步验证",
+      "expected_section": "账户安全 > 两步验证"
+    },
+    {
+      "id": "error-401",
+      "query": "登录出现 ERROR-401 是什么问题",
+      "relevant_doc_id": "technical-troubleshooting",
+      "expected_text": "表示认证失败",
+      "expected_section": "技术故障排查 > 登录失败"
+    },
+    {
+      "id": "http-500",
+      "query": "HTTP 500 一直出现需要记录什么信息",
+      "relevant_doc_id": "technical-troubleshooting",
+      "expected_text": "需要记录请求时间和 trace_id",
+      "expected_section": "技术故障排查 > 服务端错误"
+    },
+    {
+      "id": "points-exchange",
+      "query": "100 积分能够抵扣多少钱",
+      "relevant_doc_id": "membership-points",
+      "expected_text": "100 积分可以抵扣 1 元",
+      "expected_section": "会员与积分 > 积分抵扣"
+    },
+    {
+      "id": "birthday-points",
+      "query": "生日当月消费有什么积分权益",
+      "relevant_doc_id": "membership-points",
+      "expected_text": "会员生日当月消费可以获得双倍积分",
+      "expected_section": "会员与积分 > 生日权益"
+    },
+    {
+      "id": "payment-limit",
+      "query": "PAY-LIMIT 错误码应该怎么处理",
+      "relevant_doc_id": "payment-errors",
+      "expected_text": "用户需要降低支付金额或联系发卡银行",
+      "expected_section": ""
+    }
+  ]
+}

@@ -10,7 +10,7 @@ from rag.indexes import (
     BM25Index,
     ChromaDenseIndex,
 )
-from rag.loaders import chunk_sections, load_document
+from rag.loaders import ChunkingConfig, chunk_sections, load_document
 from rag.models import DocumentChunk, LoadedSection
 from rag.retriever import (
     CrossEncoderReranker,
@@ -31,12 +31,14 @@ class KnowledgeRuntime:
         retriever: HybridRetriever,
         chunks: Sequence[DocumentChunk] = (),
         write_dense_on_ingest: bool = True,
+        chunking_config: Optional[ChunkingConfig] = None,
     ) -> None:
         self.knowledge_base = knowledge_base
         self.dense_index = dense_index
         self.sparse_index = sparse_index
         self.retriever = retriever
         self._write_dense_on_ingest = write_dense_on_ingest
+        self._chunking_config = chunking_config or ChunkingConfig.from_env()
         self._chunks = {chunk.chunk_id: chunk for chunk in chunks}
 
     @classmethod
@@ -135,7 +137,11 @@ class KnowledgeRuntime:
 
     def add_sections(self, sections: Iterable[LoadedSection]) -> int:
         loaded = list(sections)
-        chunks = chunk_sections(loaded)
+        chunks = chunk_sections(
+            loaded,
+            chunk_size=self._chunking_config.chunk_size,
+            chunk_overlap=self._chunking_config.chunk_overlap,
+        )
         if not chunks:
             return 0
 

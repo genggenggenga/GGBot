@@ -2,11 +2,39 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List
 
 from rag.models import DocumentChunk, LoadedSection
+from rag.tokenization import count_tokens, split_by_token_budget, token_suffix
+
+
+@dataclass(frozen=True)
+class ChunkingConfig:
+    """Runtime-configurable token budgets for canonical document chunks."""
+
+    chunk_size: int = 500
+    chunk_overlap: int = 80
+
+    def __post_init__(self) -> None:
+        if (
+            self.chunk_size <= 0
+            or self.chunk_overlap < 0
+            or self.chunk_overlap >= self.chunk_size
+        ):
+            raise ValueError(
+                "chunk_size must be positive and overlap smaller than chunk_size",
+            )
+
+    @classmethod
+    def from_env(cls) -> "ChunkingConfig":
+        return cls(
+            chunk_size=int(os.getenv("RAG_CHUNK_SIZE_TOKENS", "500")),
+            chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP_TOKENS", "80")),
+        )
 
 
 def load_document(path: str | Path) -> List[LoadedSection]:
@@ -86,15 +114,18 @@ def chunk_sections(
     chunk_size: int = 500,
     chunk_overlap: int = 80,
 ) -> List[DocumentChunk]:
-    if chunk_size <= 0 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
-        raise ValueError("chunk_size must be positive and overlap smaller than chunk_size")
+    config = ChunkingConfig(chunk_size, chunk_overlap)
 
     chunks: List[DocumentChunk] = []
     for section in sections:
         parent_id = hashlib.sha256(
             f"{section.source}|{section.section}|{section.page}".encode()
         ).hexdigest()[:16]
-        pieces = _recursive_split(section.text, chunk_size, chunk_overlap)
+        pieces = _recursive_split(
+            section.text,
+            config.chunk_size,
+            config.chunk_overlap,
+        )
         for index, content in enumerate(pieces):
             chunk_id = hashlib.sha256(
                 f"{parent_id}|{index}|{content}".encode()
@@ -117,28 +148,32 @@ def _recursive_split(text: str, chunk_size: int, overlap: int) -> List[str]:
     text = text.strip()
     if not text:
         return []
-    if len(text) <= chunk_size:
+    if count_tokens(text) <= chunk_size:
         return [text]
 
+    payload_size = chunk_size - overlap
     separators = ("\n\n", "\n", "。", "！", "？", ". ", " ")
     pieces = [text]
     for separator in separators:
         next_pieces: List[str] = []
         for piece in pieces:
-            if len(piece) <= chunk_size:
+            if count_tokens(piece) <= payload_size:
                 next_pieces.append(piece)
             else:
-                next_pieces.extend(_pack(piece.split(separator), separator, chunk_size))
+                next_pieces.extend(
+                    _pack(piece.split(separator), separator, payload_size),
+                )
         pieces = next_pieces
 
     bounded: List[str] = []
     for piece in pieces:
-        bounded.extend(piece[i:i + chunk_size] for i in range(0, len(piece), chunk_size))
+        bounded.extend(split_by_token_budget(piece, payload_size))
 
     result: List[str] = []
     previous = ""
     for piece in bounded:
-        content = f"{previous[-overlap:]}{piece}" if previous and overlap else piece
+        prefix = token_suffix(previous, overlap) if previous else ""
+        content = f"{prefix}\n{piece}" if prefix else piece
         result.append(content.strip())
         previous = piece
     return [item for item in result if item]
@@ -149,7 +184,7 @@ def _pack(parts: List[str], separator: str, limit: int) -> List[str]:
     current = ""
     for part in (part.strip() for part in parts if part.strip()):
         candidate = f"{current}{separator}{part}" if current else part
-        if current and len(candidate) > limit:
+        if current and count_tokens(candidate) > limit:
             packed.append(current)
             current = part
         else:

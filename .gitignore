@@ -15,6 +15,7 @@ data/*
 !data/eval/
 data/eval/*
 !data/eval/customer_agent_cases.json
+!data/eval/rag_chunking_cases.json
 logs/
 
 # IDE

@@ -68,9 +68,20 @@ Server 提供 `query_order`、`track_package`、`check_refund_eligibility`、`cr
 
 RAG 链路由 ChromaDB Dense、独立 BM25、RRF、Cross-Encoder Reranker 和 Citation 组成。50 条固定评测样本位于 `data/eval/customer_agent_cases.json`。
 
+文档切片按模型无关 token 预算执行，默认每个 chunk 最多 500 tokens、相邻 chunk 重叠 80 tokens。可通过环境变量调整：
+
+```bash
+export RAG_CHUNK_SIZE_TOKENS=500
+export RAG_CHUNK_OVERLAP_TOKENS=80
+```
+
+修改参数只影响新导入或重新索引的文档。Chunking 黄金评测集位于 `data/eval/rag_chunking_cases.json`，实际执行文档解析、切片和 BM25 检索：
+
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python -m evaluation.local_eval_runner
+.venv/bin/python -m evaluation.chunking_eval
+.venv/bin/python -m evaluation.chunking_eval --chunk-size 256 --chunk-overlap 32
 curl -s -X POST http://localhost:8000/eval/run \
   -H 'Content-Type: application/json' \
   -d '{"mode":"customer_agent"}'
