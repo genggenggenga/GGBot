@@ -11,7 +11,7 @@ from rag.models import DocumentChunk, SearchHit
 from rag.retriever import HybridRetriever, reciprocal_rank_fusion
 from rag.tokenization import count_tokens
 from rag.tool import register_rag_tool
-from rag.versioning import RetrievalFilter
+from rag.versioning import MAX_TIMESTAMP, RetrievalFilter
 
 
 def make_chunk(
@@ -461,3 +461,90 @@ async def test_rag_tool_obeys_agent_whitelist():
 
     assert result.success is False
     assert "not allowed" in result.error
+
+
+@pytest.mark.asyncio
+async def test_rag_search_compares_current_and_previous_versions():
+    v1 = DocumentChunk(
+        chunk_id="refund-v1",
+        content="退款政策：签收后十五天内可退款。",
+        source="refund.md",
+        title="退款政策",
+        section="期限",
+        chunk_index=0,
+        parent_id="refund-v1-parent",
+        metadata={
+            "knowledge_id": "refund-policy",
+            "version": "v1",
+            "status": "published",
+            "effective_at": 100.0,
+            "expires_at": 200.0,
+        },
+    )
+    v2 = DocumentChunk(
+        chunk_id="refund-v2",
+        content="退款政策：签收后七天内可退款。",
+        source="refund.md",
+        title="退款政策",
+        section="期限",
+        chunk_index=0,
+        parent_id="refund-v2-parent",
+        metadata={
+            "knowledge_id": "refund-policy",
+            "version": "v2",
+            "status": "published",
+            "effective_at": 200.0,
+            "expires_at": MAX_TIMESTAMP,
+        },
+    )
+    sparse = BM25Index()
+    sparse.add([v1, v2])
+    retriever = HybridRetriever(FakeDenseIndex(), sparse)
+    registry = ToolRegistry()
+    register_rag_tool(registry, retriever, agent_names=["knowledge"])
+
+    result = await registry.call(
+        "knowledge",
+        "rag_search",
+        {
+            "query": "退款政策最近有没有变化",
+            "mode": "hybrid",
+        },
+    )
+
+    comparison = result.data["temporal_comparison"]
+    assert result.success
+    assert result.data["temporal_mode"] == "compare_previous"
+    assert comparison["current_version"] == "v2"
+    assert comparison["previous_version"] == "v1"
+    assert comparison["changed"] is True
+    assert "七天" in comparison["added"][0]
+    assert "十五天" in comparison["removed"][0]
+    assert [item["citation_id"] for item in result.data["citations"]] == [
+        "[1]",
+        "[2]",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rag_search_keeps_current_mode_for_non_temporal_query():
+    chunk = make_chunk("current", "七天内可退款")
+    dense = FakeDenseIndex([
+        SearchHit(chunk=chunk, score=0.9, dense_score=0.9),
+    ])
+    registry = ToolRegistry()
+    register_rag_tool(
+        registry,
+        HybridRetriever(dense, BM25Index()),
+        agent_names=["knowledge"],
+    )
+
+    result = await registry.call(
+        "knowledge",
+        "rag_search",
+        {"query": "退款期限是什么", "mode": "dense"},
+    )
+
+    assert result.success
+    assert result.data["temporal_mode"] == "current"
+    assert "temporal_comparison" not in result.data

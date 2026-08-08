@@ -1,20 +1,26 @@
 """Deterministic domain agents built on the shared ToolRegistry."""
 from dataclasses import dataclass, field
+import json
+import logging
 from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
 from core.agent_models import (
     ConfirmationStatus,
+    DecisionType,
     DialogueState,
     Observation,
     PendingAction,
     get_intent_schema,
     get_missing_slots,
 )
-from core.tool_registry import ToolRegistry
+from core.react_planner import ReActPlanner
+from core.tool_registry import ToolRegistry, ToolType
 from rag.query_planner import QueryPlanner
 
+
+logger = logging.getLogger(__name__)
 
 KNOWLEDGE_AGENT = "knowledge"
 ORDER_AGENT = "order"
@@ -157,11 +163,40 @@ class GoalCompletionEvaluator:
         if condition == "answer_grounded_in_knowledge":
             return bool(result.citations)
         if condition == "order_fact_returned":
-            return "query_order" in names
+            return bool(names & {
+                "query_order",
+                "query_order_items",
+                "query_payment_detail",
+                "query_invoice",
+            })
         if condition == "logistics_fact_returned":
-            return bool(names & {"query_order", "track_package"})
+            return bool(names & {
+                "query_order",
+                "track_package",
+                "estimate_delivery",
+                "diagnose_delivery_exception",
+                "rag_search",
+            })
         if condition == "refund_created_or_handoff_created":
-            return bool(names & {"create_refund", "check_refund_eligibility", "query_order"})
+            return bool(names & {
+                "create_refund",
+                "check_refund_eligibility",
+                "evaluate_after_sales_options",
+                "calculate_refund_quote",
+                "query_order",
+            })
+        if condition == "return_created_or_handoff_created":
+            return bool(names & {
+                "create_return",
+                "evaluate_after_sales_options",
+                "create_ticket",
+            })
+        if condition == "order_cancelled_or_handoff_created":
+            return bool(names & {
+                "cancel_order",
+                "evaluate_after_sales_options",
+                "create_ticket",
+            })
         if condition == "handoff_created":
             return any(
                 observation.name == "create_ticket"
@@ -173,18 +208,25 @@ class GoalCompletionEvaluator:
 
 
 class ServiceAgent:
-    """Shared bounded execution for order, logistics and after-sales agents."""
+    """Shared deterministic fallback and bounded ReAct execution."""
 
     name = "service"
     system_prompt = ""
     allowed_tools: tuple[str, ...] = ()
+    react_allowed_tools: tuple[str, ...] = ()
     completion_condition = ""
 
-    def __init__(self, registry: ToolRegistry, max_steps: int = 4) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        max_steps: int = 4,
+        planner: Optional[ReActPlanner] = None,
+    ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
         self._registry = registry
         self._max_steps = max_steps
+        self._planner = planner
         self._registry.set_agent_whitelist(self.name, set(self.allowed_tools))
 
     async def execute(
@@ -201,6 +243,27 @@ class ServiceAgent:
             else state
         )
         observations = list(seed_observations or [])
+        if self._planner is not None:
+            return await self._execute_react(
+                task_state,
+                message,
+                context,
+                observations,
+            )
+        return await self._execute_deterministic(
+            task_state,
+            message,
+            context,
+            observations,
+        )
+
+    async def _execute_deterministic(
+        self,
+        task_state: DialogueState,
+        message: str,
+        context: str,
+        observations: List[Observation],
+    ) -> AgentResult:
         for _ in range(self._max_steps):
             action = self.next_action(task_state, message, observations)
             if action is None:
@@ -236,6 +299,193 @@ class ServiceAgent:
             )
         return self.finish(task_state, observations)
 
+    async def _execute_react(
+        self,
+        task_state: DialogueState,
+        message: str,
+        context: str,
+        observations: List[Observation],
+    ) -> AgentResult:
+        called_actions = set()
+        pending = task_state.pending_action
+        if pending is not None:
+            if task_state.confirmation_status == ConfirmationStatus.PENDING:
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=f"请确认是否执行 {pending.tool_name}。",
+                    observations=observations,
+                    pending_action=pending,
+                    completed=False,
+                )
+            if task_state.confirmation_status == ConfirmationStatus.CONFIRMED:
+                if pending.tool_name not in self.allowed_tools:
+                    return AgentResult(
+                        agent=self.name,
+                        success=False,
+                        response="待确认操作不属于当前 Agent。",
+                        observations=observations,
+                        completed=False,
+                        error="pending_tool_not_allowed",
+                    )
+                self._registry.confirm_action(pending.action_id)
+                arguments = dict(pending.arguments)
+                arguments["action_id"] = pending.action_id
+                result = await self._registry.call(
+                    self.name,
+                    pending.tool_name,
+                    arguments,
+                    context={"prompt_context": context} if context else None,
+                    action_id=pending.action_id,
+                )
+                observation = result.to_observation()
+                observations.append(observation)
+                called_actions.add(self._action_key(
+                    pending.tool_name,
+                    pending.arguments,
+                ))
+                if not result.success:
+                    return AgentResult(
+                        agent=self.name,
+                        success=False,
+                        response=self.failure_response(
+                            pending.tool_name,
+                            result.error,
+                        ),
+                        observations=observations,
+                        completed=False,
+                        error=result.error,
+                    )
+
+        react_tools = set(self.react_allowed_tools or self.allowed_tools)
+        tool_specs = [
+            spec
+            for spec in self._registry.list_tools(self.name)
+            if spec.name in react_tools
+        ]
+        for _ in range(self._max_steps):
+            try:
+                decision = await self._planner.decide(
+                    agent_name=self.name,
+                    goal=task_state.active_intent or "other",
+                    message=message,
+                    state=task_state,
+                    observations=observations,
+                    tools=tool_specs,
+                    system_prompt=self.system_prompt,
+                )
+            except Exception as ex:
+                logger.warning(
+                    "ReAct planning failed for %s, using deterministic fallback: %s",
+                    self.name,
+                    ex,
+                )
+                return await self._execute_deterministic(
+                    task_state,
+                    message,
+                    context,
+                    [],
+                )
+
+            if decision.type == DecisionType.FINISH:
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=decision.response or "",
+                    observations=observations,
+                )
+            if decision.type == DecisionType.CLARIFY:
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=decision.response or "请补充必要信息。",
+                    observations=observations,
+                    completed=False,
+                    missing_slots=list(task_state.missing_slots),
+                )
+            if decision.type == DecisionType.HANDOFF:
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=decision.response or "建议转人工继续处理。",
+                    observations=observations,
+                    completed=False,
+                )
+
+            tool_name = decision.tool_name or ""
+            spec = self._registry.get_spec(tool_name)
+            if spec is None or tool_name not in react_tools:
+                return AgentResult(
+                    agent=self.name,
+                    success=False,
+                    response="Agent 选择了未授权工具，已停止执行。",
+                    observations=observations,
+                    completed=False,
+                    error=f"react_tool_not_allowed:{tool_name}",
+                )
+            arguments = dict(decision.arguments)
+            arguments.pop("action_id", None)
+            action_key = self._action_key(tool_name, arguments)
+            if action_key in called_actions:
+                return AgentResult(
+                    agent=self.name,
+                    success=False,
+                    response="检测到重复工具调用，已停止执行。",
+                    observations=observations,
+                    completed=False,
+                    error="repeated_tool_call",
+                )
+            called_actions.add(action_key)
+
+            if spec.tool_type == ToolType.WRITE:
+                action = PendingAction(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                )
+                self._registry.mark_pending_action(action.action_id)
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=(
+                        decision.response
+                        or f"即将执行 {tool_name}，请确认是否继续。"
+                    ),
+                    observations=observations,
+                    pending_action=action,
+                    completed=False,
+                )
+
+            result = await self._registry.call(
+                self.name,
+                tool_name,
+                arguments,
+                context={"prompt_context": context} if context else None,
+            )
+            observation = result.to_observation()
+            observations.append(observation)
+            if not result.success:
+                return AgentResult(
+                    agent=self.name,
+                    success=False,
+                    response=self.failure_response(tool_name, result.error),
+                    observations=observations,
+                    completed=False,
+                    error=result.error,
+                )
+
+        return AgentResult(
+            agent=self.name,
+            success=False,
+            response="处理步骤超过限制，建议转人工继续处理。",
+            observations=observations,
+            completed=False,
+            error="max_steps_exceeded",
+        )
+
+    @staticmethod
+    def _action_key(tool_name: str, arguments: Any) -> str:
+        return f"{tool_name}:{json.dumps(arguments, sort_keys=True, default=str)}"
+
     def next_action(
         self,
         state: DialogueState,
@@ -259,7 +509,12 @@ class ServiceAgent:
 class OrderAgent(ServiceAgent):
     name = ORDER_AGENT
     system_prompt = "只根据订单和支付工具返回的事实回答，不猜测订单状态。"
-    allowed_tools = ("query_order",)
+    allowed_tools = (
+        "query_order",
+        "query_order_items",
+        "query_payment_detail",
+        "query_invoice",
+    )
     completion_condition = "order_fact_returned"
 
     def next_action(self, state, message, observations):
@@ -299,7 +554,13 @@ class OrderAgent(ServiceAgent):
 class LogisticsAgent(ServiceAgent):
     name = LOGISTICS_AGENT
     system_prompt = "结合订单和物流轨迹解释配送状态，不编造预计时间。"
-    allowed_tools = ("query_order", "track_package", "rag_search")
+    allowed_tools = (
+        "query_order",
+        "track_package",
+        "estimate_delivery",
+        "diagnose_delivery_exception",
+        "rag_search",
+    )
     completion_condition = "logistics_fact_returned"
 
     def next_action(self, state, message, observations):
@@ -361,9 +622,22 @@ class AfterSalesAgent(ServiceAgent):
     allowed_tools = (
         "query_order",
         "check_refund_eligibility",
+        "evaluate_after_sales_options",
+        "calculate_refund_quote",
         "create_refund",
+        "create_return",
+        "cancel_order",
         "create_ticket",
         "rag_search",
+    )
+    react_allowed_tools = (
+        "query_order",
+        "evaluate_after_sales_options",
+        "calculate_refund_quote",
+        "create_refund",
+        "create_return",
+        "cancel_order",
+        "create_ticket",
     )
     completion_condition = "refund_created_or_handoff_created"
     _UNIMPLEMENTED_RESPONSES = {
@@ -387,7 +661,10 @@ class AfterSalesAgent(ServiceAgent):
         )
         if task_state.active_intent in {"complaint", "escalation"}:
             return await self._execute_handoff(task_state, message, context)
-        if task_state.active_intent != "refund_request":
+        if (
+            task_state.active_intent != "refund_request"
+            and self._planner is None
+        ):
             return AgentResult(
                 agent=self.name,
                 success=True,
@@ -688,6 +965,16 @@ class KnowledgeAgent:
                 citations=citations,
             )
 
+        comparison = payload.get("temporal_comparison")
+        if isinstance(comparison, dict):
+            return AgentResult(
+                agent=self.name,
+                success=True,
+                response=self._temporal_response(comparison),
+                observations=[observation],
+                citations=citations,
+            )
+
         first = items[0]
         chunk = first.get("chunk") if isinstance(first, dict) else None
         content = (
@@ -703,6 +990,29 @@ class KnowledgeAgent:
             observations=[observation],
             citations=citations,
         )
+
+    @staticmethod
+    def _temporal_response(comparison: Dict[str, Any]) -> str:
+        current = comparison.get("current_version") or "当前版本"
+        previous = comparison.get("previous_version")
+        if not comparison.get("previous_found"):
+            return (
+                f"已找到当前知识版本 {current}，但没有检索到上一历史版本，"
+                "暂时无法判断最近是否发生变化。[1]"
+            )
+        if not comparison.get("changed"):
+            return (
+                f"对比 {previous} 与 {current}，未发现政策正文变化。[1][2]"
+            )
+        parts = [f"对比 {previous} 与 {current}，政策存在以下变化："]
+        added = comparison.get("added") or []
+        removed = comparison.get("removed") or []
+        if added:
+            parts.append("新增：" + "；".join(str(item) for item in added[:3]))
+        if removed:
+            parts.append("删除：" + "；".join(str(item) for item in removed[:3]))
+        parts.append("[1][2]")
+        return "\n".join(parts)
 
 
 class DomainAgentRuntime:

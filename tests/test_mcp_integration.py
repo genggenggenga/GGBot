@@ -39,9 +39,18 @@ async def protocol_scenario():
         names = {tool.name for tool in tools}
         assert names == {
             "query_order",
+            "query_order_items",
+            "query_payment_detail",
+            "query_invoice",
             "track_package",
+            "estimate_delivery",
+            "diagnose_delivery_exception",
             "check_refund_eligibility",
+            "evaluate_after_sales_options",
+            "calculate_refund_quote",
             "create_refund",
+            "create_return",
+            "cancel_order",
             "create_ticket",
         }
 
@@ -67,6 +76,24 @@ async def protocol_scenario():
             {"order_id": "ORD-1001", "reason": "quality_issue"},
         )
         assert eligibility["eligible"] is True
+
+        items = await client.call_tool(
+            "query_order_items",
+            {"order_id": "ORD-1001"},
+        )
+        assert items["items"][0]["sku_id"] == "SKU-1001"
+
+        diagnosis = await client.call_tool(
+            "diagnose_delivery_exception",
+            {"order_id": "ORD-1002"},
+        )
+        assert diagnosis["recommended_action"] == "wait_for_next_scan"
+
+        options = await client.call_tool(
+            "evaluate_after_sales_options",
+            {"order_id": "ORD-1001"},
+        )
+        assert "refund" in options["available_actions"]
 
 
 def test_standard_mcp_initialize_list_and_call():
@@ -133,12 +160,19 @@ async def adapter_scenario():
     async with server_client() as client:
         adapters = await MCPToolAdapter.discover(
             client,
-            write_tools={"create_refund", "create_ticket"},
+            write_tools={
+                "create_refund",
+                "create_return",
+                "cancel_order",
+                "create_ticket",
+            },
         )
         by_name = {adapter.spec.name: adapter for adapter in adapters}
 
         assert by_name["query_order"].spec.tool_type == ToolType.READ
         assert by_name["create_refund"].spec.tool_type == ToolType.WRITE
+        assert by_name["create_return"].spec.tool_type == ToolType.WRITE
+        assert by_name["cancel_order"].spec.tool_type == ToolType.WRITE
         assert "order_id" in by_name["query_order"].spec.input_schema["required"]
 
         registry = ToolRegistry()

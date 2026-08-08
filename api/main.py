@@ -121,6 +121,7 @@ async def _runtime_components(app: FastAPI):
     from core.dialogue_state_tracker import DialogueStateTracker
     from core.intent_recognizer import IntentRecognizer
     from core.mcp_adapter import MCPClient, MCPToolAdapter
+    from core.react_planner import ReActPlanner
     from core.state_store import RedisStateStore
     from core.tool_registry import ToolRegistry
     from core.trace_store import TraceStore
@@ -219,6 +220,12 @@ async def _runtime_components(app: FastAPI):
             os.getenv("RAG_QUERY_REWRITE_MIN_CONFIDENCE", "0.5"),
         ),
     )
+    react_planner = (
+        ReActPlanner(plan_query)
+        if os.getenv("REACT_ENABLED", "true").lower()
+        in {"1", "true", "yes", "on"}
+        else None
+    )
 
     _mcp_client = MCPClient(
         command=sys.executable,
@@ -228,17 +235,41 @@ async def _runtime_components(app: FastAPI):
     await _mcp_client.connect()
     for adapter in await MCPToolAdapter.discover(
         _mcp_client,
-        write_tools={"create_refund", "create_ticket"},
+        write_tools={
+            "create_refund",
+            "create_return",
+            "cancel_order",
+            "create_ticket",
+        },
     ):
         registry.register(adapter)
 
     router = Router()
     domain_runtime = DomainAgentRuntime(router, {
         "knowledge": KnowledgeAgent(registry, query_planner),
-        "order": OrderAgent(registry),
-        "logistics": LogisticsAgent(registry),
-        "after_sales": AfterSalesAgent(registry),
+        "order": OrderAgent(registry, planner=react_planner),
+        "logistics": LogisticsAgent(registry, planner=react_planner),
+        "after_sales": AfterSalesAgent(registry, planner=react_planner),
     })
+
+    async def validate_recovered_slot(slot_name: str, value: str) -> bool:
+        validation_tools = {
+            "order_id": ("order", "query_order", {"order_id": value}),
+            "tracking_no": (
+                "logistics",
+                "track_package",
+                {"tracking_no": value},
+            ),
+        }
+        validation = validation_tools.get(slot_name)
+        if validation is None:
+            return False
+        agent_name, tool_name, params = validation
+        result = await registry.call(agent_name, tool_name, params)
+        payload = result.data if isinstance(result.data, dict) else {}
+        return result.success and payload.get("found") is True
+
+    recognizer.set_slot_validator(validate_recovered_slot)
     turn_engine = TurnEngine(state_store)
     _trace_store = TraceStore()
     _customer_runtime = CustomerAgentRuntime(
@@ -359,6 +390,20 @@ class ChatResponse(BaseModel):
     citations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class MCPToolInfo(BaseModel):
+    name: str
+    title: Optional[str] = None
+    description: str = ""
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+    output_schema: Optional[Dict[str, Any]] = None
+    annotations: Optional[Dict[str, Any]] = None
+
+
+class MCPToolListResponse(BaseModel):
+    total: int
+    tools: List[MCPToolInfo] = Field(default_factory=list)
+
+
 # ── 路由 ──────────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
@@ -381,6 +426,43 @@ async def health():
         "agents": _customer_runtime.get_stats(),
         "tools": _tool_registry.get_stats(),
     }
+
+
+@app.get(
+    "/mcp/tools",
+    response_model=MCPToolListResponse,
+    tags=["MCP"],
+)
+async def list_mcp_tools() -> MCPToolListResponse:
+    """返回当前 MCP Server 暴露的全部工具定义。"""
+    if _mcp_client is None:
+        raise HTTPException(503, "MCP Client 未初始化")
+    try:
+        discovered = await _mcp_client.list_tools()
+    except Exception as ex:
+        logger.warning("查询 MCP 工具失败: %s", ex)
+        raise HTTPException(503, "MCP Server 不可用") from ex
+
+    tools = [
+        MCPToolInfo(
+            name=tool.name,
+            title=getattr(tool, "title", None),
+            description=getattr(tool, "description", None) or "",
+            input_schema=getattr(tool, "inputSchema", None) or {},
+            output_schema=getattr(tool, "outputSchema", None),
+            annotations=(
+                tool.annotations.model_dump(
+                    mode="json",
+                    by_alias=True,
+                    exclude_none=True,
+                )
+                if getattr(tool, "annotations", None) is not None
+                else None
+            ),
+        )
+        for tool in discovered
+    ]
+    return MCPToolListResponse(total=len(tools), tools=tools)
 
 
 @app.get("/skills", tags=["Skills"])

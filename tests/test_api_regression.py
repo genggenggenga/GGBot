@@ -75,6 +75,56 @@ def test_health_rejects_partial_primary_runtime(monkeypatch):
     assert "tool_registry" in str(exc_info.value.detail)
 
 
+def test_mcp_tools_endpoint_returns_discovered_tool_contracts(monkeypatch):
+    class Annotations:
+        def model_dump(self, **kwargs):
+            assert kwargs["by_alias"] is True
+            return {"readOnlyHint": True}
+
+    class MCPClient:
+        async def list_tools(self):
+            return [
+                SimpleNamespace(
+                    name="query_order",
+                    title="Query order",
+                    description="Query an order",
+                    inputSchema={
+                        "type": "object",
+                        "required": ["order_id"],
+                    },
+                    outputSchema={"type": "object"},
+                    annotations=Annotations(),
+                ),
+                SimpleNamespace(
+                    name="create_refund",
+                    title=None,
+                    description=None,
+                    inputSchema={"type": "object"},
+                    outputSchema=None,
+                    annotations=None,
+                ),
+            ]
+
+    monkeypatch.setattr(api_main, "_mcp_client", MCPClient())
+
+    result = run(api_main.list_mcp_tools())
+
+    assert result.total == 2
+    assert result.tools[0].name == "query_order"
+    assert result.tools[0].input_schema["required"] == ["order_id"]
+    assert result.tools[0].annotations == {"readOnlyHint": True}
+    assert result.tools[1].description == ""
+
+
+def test_mcp_tools_endpoint_rejects_uninitialized_client(monkeypatch):
+    monkeypatch.setattr(api_main, "_mcp_client", None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        run(api_main.list_mcp_tools())
+
+    assert exc_info.value.status_code == 503
+
+
 def test_knowledge_add_and_stats_use_knowledge_runtime(monkeypatch):
     class KnowledgeBase:
         doc_count = 8
@@ -186,6 +236,7 @@ def test_existing_routes_are_still_registered():
         "/health",
         "/skills",
         "/skills/reload",
+        "/mcp/tools",
         "/chat",
         "/knowledge/add",
         "/knowledge/upload",

@@ -399,6 +399,43 @@ def test_knowledge_agent_calls_rag_once_and_returns_citation():
     assert result.citations[0]["source"] == "policy.md"
 
 
+def test_knowledge_agent_formats_temporal_version_comparison():
+    registry = ToolRegistry()
+
+    async def rag_search(params, context):
+        return {
+            "answered": True,
+            "hits": [{
+                "chunk": {"content": "签收后七天内可退款。"},
+            }],
+            "citations": [
+                {"citation_id": "[1]", "version": "v2"},
+                {"citation_id": "[2]", "version": "v1"},
+            ],
+            "temporal_comparison": {
+                "current_version": "v2",
+                "previous_version": "v1",
+                "previous_found": True,
+                "changed": True,
+                "added": ["签收后七天内可退款。"],
+                "removed": ["签收后十五天内可退款。"],
+            },
+        }
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    result = run(KnowledgeAgent(registry).execute(
+        DialogueState(active_intent="refund_policy"),
+        "退款政策最近有没有变化",
+    ))
+
+    assert result.success
+    assert "v1" in result.response
+    assert "v2" in result.response
+    assert "新增" in result.response
+    assert "删除" in result.response
+    assert result.response.endswith("[1][2]")
+
+
 def test_knowledge_agent_uses_skill_and_memory_context_in_retrieval_query():
     registry = ToolRegistry()
     queries = []

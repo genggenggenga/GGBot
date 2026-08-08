@@ -3,6 +3,8 @@
 No real LLM, Redis, or network required.
 """
 import json
+from types import SimpleNamespace
+
 import pytest
 
 from core.agent_models import (
@@ -211,6 +213,25 @@ class TestBuildUnderstandingFromFastTrack:
 
 
 class TestStructuredRecognizerFastTrack:
+    class FakeMessages:
+        def __init__(self, payload):
+            self.payload = payload
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            del kwargs
+            self.calls += 1
+            return SimpleNamespace(content=[json.dumps(self.payload)])
+
+    @classmethod
+    def recognizer_with_response(cls, payload):
+        recognizer = IntentRecognizer.__new__(IntentRecognizer)
+        recognizer.model = "test-model"
+        messages = cls.FakeMessages(payload)
+        recognizer.client = SimpleNamespace(messages=messages)
+        recognizer._slot_validator = None
+        return recognizer, messages
+
     def test_legacy_llm_recognizer_remains_a_class_method(self):
         assert callable(IntentRecognizer._llm_recognize)
 
@@ -258,6 +279,92 @@ class TestStructuredRecognizerFastTrack:
 
         assert result.primary_intent == "logistics_query"
         assert result.user_act == UserAct.SWITCH
+
+    @pytest.mark.asyncio
+    async def test_missing_slot_without_slot_signal_skips_llm(self):
+        recognizer, messages = self.recognizer_with_response({
+            "intent": "refund_request",
+            "confidence": 0.95,
+            "slots": {"order_id": "ORD-9999"},
+        })
+
+        result = await recognizer.recognize_structured("我要退款")
+
+        assert messages.calls == 0
+        assert result.primary_intent == "refund_request"
+        assert result.extracted_slots == {}
+
+    @pytest.mark.asyncio
+    async def test_slot_signal_uses_llm_and_accepts_grounded_business_value(self):
+        recognizer, messages = self.recognizer_with_response({
+            "intent": "refund_request",
+            "confidence": 0.95,
+            "slots": {"order_id": "ab-123-xyz"},
+            "user_act": "inform",
+        })
+        validated = []
+
+        async def validate(slot_name, value):
+            validated.append((slot_name, value))
+            return True
+
+        recognizer.set_slot_validator(validate)
+        result = await recognizer.recognize_structured(
+            "我要退款，订单编号是 ab-123-xyz",
+        )
+
+        assert messages.calls == 1
+        assert validated == [("order_id", "AB-123-XYZ")]
+        assert result.primary_intent == "refund_request"
+        assert result.extracted_slots == {"order_id": "AB-123-XYZ"}
+
+    @pytest.mark.asyncio
+    async def test_llm_slot_not_present_in_message_is_rejected(self):
+        recognizer, messages = self.recognizer_with_response({
+            "intent": "refund_request",
+            "confidence": 0.95,
+            "slots": {"order_id": "ORD-9999"},
+            "user_act": "inform",
+        })
+        validator_calls = []
+
+        async def validate(slot_name, value):
+            validator_calls.append((slot_name, value))
+            return True
+
+        recognizer.set_slot_validator(validate)
+        result = await recognizer.recognize_structured(
+            "我要退款，订单编号在截图里",
+        )
+
+        assert messages.calls == 1
+        assert validator_calls == []
+        assert result.extracted_slots == {}
+
+    @pytest.mark.asyncio
+    async def test_grounded_llm_slot_rejected_when_business_validation_fails(self):
+        recognizer, messages = self.recognizer_with_response({
+            "intent": "logistics_query",
+            "confidence": 0.95,
+            "slots": {"tracking_no": "carrier-12345"},
+            "user_act": "inform",
+        })
+
+        async def validate(slot_name, value):
+            assert (slot_name, value) == (
+                "tracking_no",
+                "CARRIER-12345",
+            )
+            return False
+
+        recognizer.set_slot_validator(validate)
+        result = await recognizer.recognize_structured(
+            "帮我查物流，运单号 carrier-12345",
+        )
+
+        assert messages.calls == 1
+        assert result.primary_intent == "logistics_query"
+        assert result.extracted_slots == {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

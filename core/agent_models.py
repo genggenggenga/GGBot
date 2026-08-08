@@ -40,6 +40,39 @@ class ExecutionState(str, Enum):
     FAILED = "failed"
 
 
+class DecisionType(str, Enum):
+    TOOL = "tool"
+    FINISH = "finish"
+    CLARIFY = "clarify"
+    HANDOFF = "handoff"
+
+
+class AgentDecision(BaseModel):
+    """Structured, auditable output from a ReAct planner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: DecisionType
+    tool_name: Optional[str] = None
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    response: Optional[str] = None
+    reason_code: str = Field(min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "AgentDecision":
+        if self.type == DecisionType.TOOL and not self.tool_name:
+            raise ValueError("tool decision requires tool_name")
+        if self.type != DecisionType.TOOL and self.tool_name is not None:
+            raise ValueError("non-tool decision cannot include tool_name")
+        if self.type in {
+            DecisionType.FINISH,
+            DecisionType.CLARIFY,
+            DecisionType.HANDOFF,
+        } and not self.response:
+            raise ValueError(f"{self.type.value} decision requires response")
+        return self
+
+
 class PendingAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

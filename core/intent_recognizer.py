@@ -14,10 +14,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from anthropic import AsyncAnthropic
 
@@ -25,9 +27,27 @@ from core.llm_utils import extract_text_content
 
 from core.nlu_fast_track import fast_track_extract, build_understanding_from_fast_track
 from core.nlu_llm import understand_with_llm, make_fallback_understanding
-from core.agent_models import INTENT_SCHEMAS, UnderstandingResult, UserAct
+from core.agent_models import (
+    INTENT_SCHEMAS,
+    UnderstandingResult,
+    UserAct,
+    get_missing_slots,
+)
 
 logger = logging.getLogger(__name__)
+
+SlotValidator = Callable[[str, str], Awaitable[bool]]
+_SLOT_SIGNAL_PATTERNS = {
+    "order_id": re.compile(
+        r"(?:订单(?:号|编号|id)|order\s*(?:id|no|number))",
+        re.IGNORECASE,
+    ),
+    "tracking_no": re.compile(
+        r"(?:物流(?:单)?号|快递(?:单)?号|运单号|tracking\s*(?:id|no|number))",
+        re.IGNORECASE,
+    ),
+}
+_SLOT_VALUE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{3,63}")
 
 
 class IntentCategory(Enum):
@@ -119,6 +139,7 @@ class IntentRecognizer:
         self._cache: Dict[str, IntentResult] = {}
         self.cache_hits   = 0
         self.cache_misses = 0
+        self._slot_validator: Optional[SlotValidator] = None
 
     # ── 公开接口 ──────────────────────────────────────────────────────────────
 
@@ -179,6 +200,13 @@ class IntentRecognizer:
             self._tpl_embeddings.pop(correct, None)  # 下次重新计算
             logger.info(f"学习新样本 → {correct.value}: {message[:40]}")
 
+    def set_slot_validator(
+        self,
+        validator: Optional[SlotValidator],
+    ) -> None:
+        """Set an optional business validator for LLM-recovered slot values."""
+        self._slot_validator = validator
+
     # ── 三路识别策略 ──────────────────────────────────────────────────────────
 
     # ── Structured entry point ─────────────────────────────────────────────────
@@ -214,11 +242,36 @@ class IntentRecognizer:
                     "route_to": INTENT_SCHEMAS[active_intent].allowed_agents[0]
                     if active_intent in INTENT_SCHEMAS else None,
                 })
-            return self._normalize_intent_transition(
+            fast_track_result = self._normalize_intent_transition(
                 result,
                 current_state,
                 explicit_new_goal=ft.explicit_intent,
             )
+            available_slots = dict((current_state or {}).get("slots") or {})
+            available_slots.update(fast_track_result.extracted_slots)
+            missing_slots = (
+                get_missing_slots(
+                    fast_track_result.primary_intent,
+                    available_slots,
+                )
+                if fast_track_result.primary_intent in INTENT_SCHEMAS
+                else []
+            )
+            signaled_slots = [
+                slot
+                for slot in missing_slots
+                if self._has_slot_signal(message, slot)
+            ]
+            if (
+                not missing_slots
+                or not signaled_slots
+                or fast_track_result.user_act
+                in {UserAct.CONFIRM, UserAct.REJECT}
+            ):
+                return fast_track_result
+        else:
+            fast_track_result = None
+            signaled_slots = []
 
         # 2. Single structured LLM call (re-uses the Anthropic client)
         async def _llm_fn(prompt: str) -> str:
@@ -237,10 +290,101 @@ class IntentRecognizer:
                 current_state,
                 history=history,
             )
+            slots_to_validate = (
+                signaled_slots
+                if fast_track_result is not None
+                else list(result.extracted_slots)
+            )
+            validated_slots = await self._validated_llm_slots(
+                message,
+                result.extracted_slots,
+                slots_to_validate,
+            )
+            if fast_track_result is not None:
+                merged_slots = dict(fast_track_result.extracted_slots)
+                merged_slots.update(validated_slots)
+                corrected_slots = list(dict.fromkeys([
+                    *fast_track_result.corrected_slots,
+                    *[
+                        slot
+                        for slot in result.corrected_slots
+                        if slot in validated_slots
+                    ],
+                ]))
+                result = fast_track_result.model_copy(update={
+                    "extracted_slots": merged_slots,
+                    "corrected_slots": corrected_slots,
+                })
+            elif validated_slots != result.extracted_slots:
+                result = result.model_copy(update={
+                    "extracted_slots": validated_slots,
+                    "corrected_slots": [
+                        slot
+                        for slot in result.corrected_slots
+                        if slot in validated_slots
+                    ],
+                })
             return self._normalize_intent_transition(result, current_state)
         except Exception as ex:
             logger.warning(f"recognize_structured LLM call failed: {ex}")
-            return make_fallback_understanding(message, current_state)
+            return fast_track_result or make_fallback_understanding(
+                message,
+                current_state,
+            )
+
+    @staticmethod
+    def _has_slot_signal(message: str, slot_name: str) -> bool:
+        pattern = _SLOT_SIGNAL_PATTERNS.get(slot_name)
+        return bool(pattern and pattern.search(message))
+
+    async def _validated_llm_slots(
+        self,
+        message: str,
+        extracted_slots: Dict[str, Any],
+        allowed_slots: List[str],
+    ) -> Dict[str, str]:
+        validated: Dict[str, str] = {}
+        validator = getattr(self, "_slot_validator", None)
+        for slot_name in allowed_slots:
+            value = self._grounded_slot_value(
+                message,
+                extracted_slots.get(slot_name),
+            )
+            if value is None:
+                continue
+            if validator is not None:
+                try:
+                    if not await validator(slot_name, value):
+                        continue
+                except Exception as ex:
+                    logger.warning(
+                        "slot business validation failed for %s: %s",
+                        slot_name,
+                        ex,
+                    )
+                    continue
+            validated[slot_name] = value
+        return validated
+
+    @staticmethod
+    def _grounded_slot_value(
+        message: str,
+        value: Any,
+    ) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        normalized = unicodedata.normalize("NFKC", value).strip()
+        compact = re.sub(r"\s+", "", normalized)
+        if not _SLOT_VALUE_PATTERN.fullmatch(compact):
+            return None
+        normalized_message = re.sub(
+            r"\s+",
+            "",
+            unicodedata.normalize("NFKC", message),
+        )
+        if compact.casefold() not in normalized_message.casefold():
+            return None
+        return compact.upper()
 
     @staticmethod
     def _normalize_intent_transition(
