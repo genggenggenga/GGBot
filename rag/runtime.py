@@ -18,6 +18,7 @@ from rag.retriever import (
     Reranker,
     SiliconFlowReranker,
 )
+from rag.versioning import normalize_knowledge_metadata
 
 
 class KnowledgeRuntime:
@@ -109,20 +110,45 @@ class KnowledgeRuntime:
             write_dense_on_ingest=write_dense,
         )
 
-    def add_documents(self, documents: List[Dict[str, str]]) -> int:
-        sections = [
-            LoadedSection(
-                text=document.get("content", ""),
-                source=document.get("source") or document.get("title", "inline"),
+    def add_documents(self, documents: List[Dict[str, Any]]) -> int:
+        sections = []
+        version_fields = {
+            "knowledge_id",
+            "version_id",
+            "version",
+            "version_seq",
+            "status",
+            "effective_at",
+            "expires_at",
+            "is_current",
+        }
+        for document in documents:
+            content = document.get("content", "")
+            if not content.strip():
+                continue
+            metadata = dict(document.get("metadata", {}))
+            metadata.update({
+                key: document[key]
+                for key in version_fields
+                if document.get(key) is not None
+            })
+            sections.append(LoadedSection(
+                text=content,
+                source=document.get("source")
+                or document.get("title", "inline"),
                 title=document.get("title", ""),
                 section=document.get("section", ""),
-            )
-            for document in documents
-            if document.get("content", "").strip()
-        ]
+                metadata=metadata,
+            ))
         return self.add_sections(sections)
 
-    def add_file(self, filename: str, content: bytes) -> int:
+    def add_file(
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
         suffix = Path(filename).suffix.lower()
         if suffix not in {".txt", ".md", ".markdown", ".pdf"}:
             raise ValueError(f"unsupported document type: {suffix}")
@@ -130,13 +156,28 @@ class KnowledgeRuntime:
             path = Path(directory) / Path(filename).name
             path.write_bytes(content)
             sections = [
-                section.model_copy(update={"source": filename})
+                section.model_copy(update={
+                    "source": filename,
+                    "metadata": {
+                        **section.metadata,
+                        **(metadata or {}),
+                    },
+                })
                 for section in load_document(path)
             ]
             return self.add_sections(sections)
 
     def add_sections(self, sections: Iterable[LoadedSection]) -> int:
-        loaded = list(sections)
+        loaded = [
+            section.model_copy(update={
+                "metadata": normalize_knowledge_metadata(
+                    section.metadata,
+                    source=section.source,
+                    title=section.title,
+                ),
+            })
+            for section in sections
+        ]
         chunks = chunk_sections(
             loaded,
             chunk_size=self._chunking_config.chunk_size,
@@ -163,8 +204,19 @@ class KnowledgeRuntime:
         if self._write_dense_on_ingest:
             self.dense_index.add(chunks)
         self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})
-        self.sparse_index.add(list(self._chunks.values()))
+        self.refresh()
         return len(chunks)
+
+    def refresh(self) -> None:
+        """Reload canonical chunks after version publication or revocation."""
+        all_chunks = getattr(self.knowledge_base, "all_chunks", None)
+        chunks = (
+            all_chunks()
+            if all_chunks is not None
+            else list(self._chunks.values())
+        )
+        self._chunks = {chunk.chunk_id: chunk for chunk in chunks}
+        self.sparse_index.add(list(self._chunks.values()))
 
 
 def local_models_enabled() -> bool:
@@ -198,6 +250,10 @@ def _collection_chunks(collection: Any) -> List[DocumentChunk]:
         data.get("metadatas", []),
     )):
         meta = metadata or {}
+        reserved = {
+            "source", "title", "section", "page",
+            "chunk_index", "parent_id",
+        }
         chunks.append(DocumentChunk(
             chunk_id=chunk_id,
             content=content,
@@ -207,5 +263,10 @@ def _collection_chunks(collection: Any) -> List[DocumentChunk]:
             page=int(meta.get("page") or 0) or None,
             chunk_index=int(meta.get("chunk_index", index)),
             parent_id=str(meta.get("parent_id") or f"document-{chunk_id}"),
+            metadata={
+                key: value
+                for key, value in meta.items()
+                if key not in reserved
+            },
         ))
     return chunks

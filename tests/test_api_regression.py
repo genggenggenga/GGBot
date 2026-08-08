@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,6 +102,83 @@ def test_knowledge_add_and_stats_use_knowledge_runtime(monkeypatch):
     assert stats["total_chunks"] == 9
 
 
+def test_knowledge_add_passes_version_metadata(monkeypatch):
+    received = []
+
+    class KnowledgeBase:
+        doc_count = 1
+
+    class Runtime:
+        knowledge_base = KnowledgeBase()
+
+        def add_documents(self, documents):
+            received.extend(documents)
+            return 1
+
+    monkeypatch.setattr(api_main, "_knowledge_runtime", Runtime())
+    effective_at = datetime(2026, 8, 8, tzinfo=timezone.utc)
+
+    result = run(api_main.add_knowledge(api_main.BatchDocInput(
+        documents=[api_main.DocInput(
+            title="退款政策",
+            content="七天内可退",
+            knowledge_id="refund-policy",
+            version="v2",
+            effective_at=effective_at,
+        )],
+    )))
+
+    assert result["added_chunks"] == 1
+    assert received[0]["metadata"]["knowledge_id"] == "refund-policy"
+    assert received[0]["metadata"]["version"] == "v2"
+    assert received[0]["metadata"]["effective_at"] == effective_at
+
+
+def test_knowledge_version_lifecycle_endpoints_refresh_runtime(monkeypatch):
+    class KnowledgeBase:
+        def list_versions(self, knowledge_id):
+            return [{"knowledge_id": knowledge_id, "version": "v2"}]
+
+        def publish_version(self, knowledge_id, version, **kwargs):
+            return {
+                "knowledge_id": knowledge_id,
+                "version": version,
+                "status": "published",
+            }
+
+        def revoke_version(self, knowledge_id, version):
+            return {
+                "knowledge_id": knowledge_id,
+                "version": version,
+                "status": "revoked",
+            }
+
+    class Runtime:
+        knowledge_base = KnowledgeBase()
+        refresh_count = 0
+
+        def refresh(self):
+            self.refresh_count += 1
+
+    runtime = Runtime()
+    monkeypatch.setattr(api_main, "_knowledge_runtime", runtime)
+
+    versions = run(api_main.list_knowledge_versions("refund-policy"))
+    published = run(api_main.publish_knowledge_version(
+        "refund-policy",
+        "v2",
+    ))
+    revoked = run(api_main.revoke_knowledge_version(
+        "refund-policy",
+        "v2",
+    ))
+
+    assert versions["versions"][0]["version"] == "v2"
+    assert published["status"] == "published"
+    assert revoked["status"] == "revoked"
+    assert runtime.refresh_count == 2
+
+
 def test_existing_routes_are_still_registered():
     paths = {route.path for route in api_main.app.routes}
 
@@ -112,6 +190,9 @@ def test_existing_routes_are_still_registered():
         "/knowledge/add",
         "/knowledge/upload",
         "/knowledge/stats",
+        "/knowledge/{knowledge_id}/versions",
+        "/knowledge/{knowledge_id}/versions/{version}/publish",
+        "/knowledge/{knowledge_id}/versions/{version}/revoke",
         "/eval/run",
         "/traces/{trace_id}",
     }.issubset(paths)

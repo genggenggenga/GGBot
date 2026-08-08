@@ -118,8 +118,12 @@ def chunk_sections(
 
     chunks: List[DocumentChunk] = []
     for section in sections:
+        version_id = section.metadata.get("version_id", "")
         parent_id = hashlib.sha256(
-            f"{section.source}|{section.section}|{section.page}".encode()
+            (
+                f"{section.source}|{section.section}|{section.page}|"
+                f"{version_id}"
+            ).encode()
         ).hexdigest()[:16]
         pieces = _recursive_split(
             section.text,

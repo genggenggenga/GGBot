@@ -130,7 +130,9 @@ async def _runtime_components(app: FastAPI):
     from monitor.performance_monitor import PerformanceMonitor
     from core.skill_loader import SkillManager
     from rag.runtime import KnowledgeRuntime, local_models_enabled
+    from rag.query_planner import QueryPlanner
     from rag.tool import register_rag_tool
+    from core.llm_utils import extract_text_content
     import redis
 
     cfg = _anthropic_cfg()
@@ -197,6 +199,27 @@ async def _runtime_components(app: FastAPI):
     )
     register_rag_tool(registry, _knowledge_runtime.retriever)
 
+    async def plan_query(prompt: str) -> str:
+        response = await recognizer.client.messages.create(
+            model=cfg["model"],
+            max_tokens=512,
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return extract_text_content(response.content)
+
+    query_planner = QueryPlanner(
+        plan_query,
+        enabled=os.getenv(
+            "RAG_MULTI_QUERY_ENABLED",
+            "true",
+        ).lower() in {"1", "true", "yes", "on"},
+        max_queries=int(os.getenv("RAG_MULTI_QUERY_MAX_QUERIES", "3")),
+        min_confidence=float(
+            os.getenv("RAG_QUERY_REWRITE_MIN_CONFIDENCE", "0.5"),
+        ),
+    )
+
     _mcp_client = MCPClient(
         command=sys.executable,
         args=["-m", "mcp_server.customer_service_server"],
@@ -211,7 +234,7 @@ async def _runtime_components(app: FastAPI):
 
     router = Router()
     domain_runtime = DomainAgentRuntime(router, {
-        "knowledge": KnowledgeAgent(registry),
+        "knowledge": KnowledgeAgent(registry, query_planner),
         "order": OrderAgent(registry),
         "logistics": LogisticsAgent(registry),
         "after_sales": AfterSalesAgent(registry),
@@ -477,16 +500,27 @@ async def prometheus_metrics():
 
 
 @app.post("/search")
-async def search(query: str, top_k: int = 5):
+async def search(
+    query: str,
+    top_k: int = 5,
+    as_of: Optional[str] = None,
+):
     """使用主 HybridRetriever 执行检索、重排和引用生成。"""
     if _knowledge_runtime is None:
         raise HTTPException(503, "服务未就绪")
+    from rag.versioning import RetrievalFilter
+
+    try:
+        filters = RetrievalFilter.current(as_of=as_of)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex)) from ex
     result = await asyncio.to_thread(
         _knowledge_runtime.retriever.search,
         query,
         top_k=top_k,
         use_sparse=True,
         use_reranker=True,
+        filters=filters,
     )
     payload = result.model_dump(mode="json")
     return {
@@ -503,11 +537,26 @@ class DocInput(BaseModel):
     """单篇文档输入。"""
     title:   str
     content: str
+    knowledge_id: Optional[str] = None
+    version: str = "v1"
+    version_seq: Optional[int] = None
+    status: str = "published"
+    effective_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    source: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class BatchDocInput(BaseModel):
     """批量文档导入请求体。"""
     documents: List[DocInput]
+
+
+class PublishVersionInput(BaseModel):
+    """可选覆盖知识版本的生效和失效时间。"""
+
+    effective_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
 
 
 class EvalIntentInput(BaseModel):
@@ -552,8 +601,34 @@ async def add_knowledge(body: BatchDocInput):
     if _knowledge_runtime is None:
         raise HTTPException(503, "知识库未初始化")
     kb = _knowledge_runtime.knowledge_base
-    documents = [{"title": d.title, "content": d.content} for d in body.documents]
-    count = _knowledge_runtime.add_documents(documents)
+    documents = []
+    for document in body.documents:
+        metadata = {
+            **document.metadata,
+            "version": document.version,
+            "status": document.status,
+        }
+        optional_metadata = {
+            "knowledge_id": document.knowledge_id,
+            "version_seq": document.version_seq,
+            "effective_at": document.effective_at,
+            "expires_at": document.expires_at,
+        }
+        metadata.update({
+            key: value
+            for key, value in optional_metadata.items()
+            if value is not None
+        })
+        documents.append({
+            "title": document.title,
+            "content": document.content,
+            "source": document.source or document.title,
+            "metadata": metadata,
+        })
+    try:
+        count = _knowledge_runtime.add_documents(documents)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex)) from ex
     return {"message": f"成功导入 {count} 个文档片段", "added_chunks": count, "total_chunks": kb.doc_count}
 
 
@@ -607,6 +682,69 @@ async def knowledge_stats():
         raise HTTPException(503, "知识库未初始化")
     kb = _knowledge_runtime.knowledge_base
     return {"total_chunks": kb.doc_count}
+
+
+@app.get(
+    "/knowledge/{knowledge_id}/versions",
+    tags=["知识库版本"],
+)
+async def list_knowledge_versions(knowledge_id: str):
+    if _knowledge_runtime is None:
+        raise HTTPException(503, "知识库未初始化")
+    return {
+        "knowledge_id": knowledge_id,
+        "versions": _knowledge_runtime.knowledge_base.list_versions(
+            knowledge_id,
+        ),
+    }
+
+
+@app.post(
+    "/knowledge/{knowledge_id}/versions/{version}/publish",
+    tags=["知识库版本"],
+)
+async def publish_knowledge_version(
+    knowledge_id: str,
+    version: str,
+    body: Optional[PublishVersionInput] = None,
+):
+    if _knowledge_runtime is None:
+        raise HTTPException(503, "知识库未初始化")
+    payload = body or PublishVersionInput()
+    try:
+        result = _knowledge_runtime.knowledge_base.publish_version(
+            knowledge_id,
+            version,
+            effective_at=payload.effective_at,
+            expires_at=payload.expires_at,
+        )
+        _knowledge_runtime.refresh()
+        return result
+    except KeyError as ex:
+        raise HTTPException(404, str(ex)) from ex
+    except ValueError as ex:
+        raise HTTPException(400, str(ex)) from ex
+
+
+@app.post(
+    "/knowledge/{knowledge_id}/versions/{version}/revoke",
+    tags=["知识库版本"],
+)
+async def revoke_knowledge_version(
+    knowledge_id: str,
+    version: str,
+):
+    if _knowledge_runtime is None:
+        raise HTTPException(503, "知识库未初始化")
+    try:
+        result = _knowledge_runtime.knowledge_base.revoke_version(
+            knowledge_id,
+            version,
+        )
+        _knowledge_runtime.refresh()
+        return result
+    except KeyError as ex:
+        raise HTTPException(404, str(ex)) from ex
 
 
 @app.post("/eval/run")

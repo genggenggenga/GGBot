@@ -10,11 +10,17 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence
 import httpx
 
 from rag.models import DocumentChunk, SearchHit
+from rag.versioning import RetrievalFilter, is_metadata_visible
 
 
 class DenseIndex(Protocol):
     def add(self, chunks: Sequence[DocumentChunk]) -> None: ...
-    def search(self, query: str, top_k: int) -> List[SearchHit]: ...
+    def search(
+        self,
+        query: str,
+        top_k: int,
+        filters: Optional[RetrievalFilter] = None,
+    ) -> List[SearchHit]: ...
 
 
 class ChromaDenseIndex:
@@ -52,8 +58,19 @@ class ChromaDenseIndex:
             metadatas=[_chunk_metadata(chunk) for chunk in chunks],
         )
 
-    def search(self, query: str, top_k: int) -> List[SearchHit]:
-        result = self._collection.query(query_texts=[query], n_results=top_k)
+    def search(
+        self,
+        query: str,
+        top_k: int,
+        filters: Optional[RetrievalFilter] = None,
+    ) -> List[SearchHit]:
+        params: Dict[str, Any] = {
+            "query_texts": [query],
+            "n_results": top_k,
+        }
+        if filters is not None:
+            params["where"] = filters.to_chroma_where()
+        result = self._collection.query(**params)
         ids = (result.get("ids") or [[]])[0]
         documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
@@ -63,8 +80,17 @@ class ChromaDenseIndex:
             ids, documents, metadatas, distances
         ):
             score = max(0.0, 1.0 - float(distance))
+            chunk = _chunk_from_metadata(chunk_id, content, metadata or {})
+            if (
+                filters is not None
+                and not is_metadata_visible(
+                    {**chunk.metadata, "source": chunk.source, "title": chunk.title},
+                    filters,
+                )
+            ):
+                continue
             hits.append(SearchHit(
-                chunk=_chunk_from_metadata(chunk_id, content, metadata or {}),
+                chunk=chunk,
                 score=score,
                 dense_score=score,
             ))
@@ -175,16 +201,32 @@ class BM25Index:
         total = sum(len(tokens) for tokens in self._tokens)
         self._average_length = total / len(self._tokens) if self._tokens else 0.0
 
-    def search(self, query: str, top_k: int) -> List[SearchHit]:
+    def search(
+        self,
+        query: str,
+        top_k: int,
+        filters: Optional[RetrievalFilter] = None,
+    ) -> List[SearchHit]:
         query_tokens = tokenize(query)
         if not query_tokens or not self._chunks:
             return []
         scores = [
-            self._score(query_tokens, tokens)
-            for tokens in self._tokens
+            (index, self._score(query_tokens, tokens))
+            for index, tokens in enumerate(self._tokens)
+            if (
+                filters is None
+                or is_metadata_visible(
+                    {
+                        **self._chunks[index].metadata,
+                        "source": self._chunks[index].source,
+                        "title": self._chunks[index].title,
+                    },
+                    filters,
+                )
+            )
         ]
         ranked = sorted(
-            enumerate(scores), key=lambda item: item[1], reverse=True
+            scores, key=lambda item: item[1], reverse=True
         )
         return [
             SearchHit(

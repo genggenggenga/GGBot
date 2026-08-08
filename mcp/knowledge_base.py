@@ -18,12 +18,21 @@ Embedding 策略（由 RAG_EMBEDDING_PROVIDER 控制）：
 """
 import logging
 import os
-from typing import Any, Dict, List
+import threading
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 import chromadb
 
 from rag.loaders import ChunkingConfig, chunk_sections
 from rag.models import DocumentChunk, LoadedSection
+from rag.versioning import (
+    KnowledgeStatus,
+    MAX_TIMESTAMP,
+    RetrievalFilter,
+    normalize_knowledge_metadata,
+    parse_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +94,8 @@ class KnowledgeBase:
             embedding_function=embedding_function,
         )
         self._chunking_config = ChunkingConfig.from_env()
+        self._version_lock = threading.RLock()
+        self._migrate_legacy_metadata()
 
         # 如果知识库为空，导入默认文档
         if self._collection.count() == 0:
@@ -99,22 +110,30 @@ class KnowledgeBase:
         documents 格式: [{"title": "...", "content": "..."}, ...]
         长文档会自动切片（每片 500 字）。
         """
-        sections = [
-            LoadedSection(
-                text=str(document.get("content", "")),
-                source=str(
-                    document.get("source")
-                    or document.get("title")
-                    or "inline"
-                ),
-                title=str(document.get("title", "")),
+        sections = []
+        for document in documents:
+            content = str(document.get("content", ""))
+            if not content.strip():
+                continue
+            source = str(
+                document.get("source")
+                or document.get("title")
+                or "inline"
+            )
+            title = str(document.get("title", ""))
+            metadata = normalize_knowledge_metadata(
+                dict(document.get("metadata", {})),
+                source=source,
+                title=title,
+            )
+            sections.append(LoadedSection(
+                text=content,
+                source=source,
+                title=title,
                 section=str(document.get("section", "")),
                 page=document.get("page"),
-                metadata=dict(document.get("metadata", {})),
-            )
-            for document in documents
-            if str(document.get("content", "")).strip()
-        ]
+                metadata=metadata,
+            ))
         return self.add_chunks(chunk_sections(
             sections,
             chunk_size=self._chunking_config.chunk_size,
@@ -125,34 +144,195 @@ class KnowledgeBase:
         """Persist canonical chunks and their full citation metadata."""
         if not chunks:
             return 0
-        self._collection.upsert(
-            ids=[chunk.chunk_id for chunk in chunks],
-            documents=[chunk.content for chunk in chunks],
-            metadatas=[
-                {
-                    "source": chunk.source,
-                    "title": chunk.title,
-                    "section": chunk.section,
-                    "page": chunk.page or 0,
-                    "chunk_index": chunk.chunk_index,
-                    "parent_id": chunk.parent_id,
-                    **chunk.metadata,
+        prepared = [
+            chunk.model_copy(update={
+                "metadata": normalize_knowledge_metadata(
+                    chunk.metadata,
+                    source=chunk.source,
+                    title=chunk.title,
+                ),
+            })
+            for chunk in chunks
+        ]
+        with self._version_lock:
+            version_ids = {
+                str(chunk.metadata["version_id"])
+                for chunk in prepared
+            }
+            for version_id in version_ids:
+                existing = self._collection.get(
+                    where={"version_id": version_id},
+                    include=["metadatas"],
+                )
+                existing_metadatas = existing.get("metadatas", [])
+                if existing_metadatas:
+                    lifecycle = {
+                        key: existing_metadatas[0].get(key)
+                        for key in (
+                            "created_at",
+                            "effective_at",
+                            "expires_at",
+                            "declared_expires_at",
+                            "status",
+                            "is_current",
+                        )
+                    }
+                    prepared = [
+                        chunk.model_copy(update={
+                            "metadata": {
+                                **chunk.metadata,
+                                **lifecycle,
+                            },
+                        })
+                        if chunk.metadata["version_id"] == version_id
+                        else chunk
+                        for chunk in prepared
+                    ]
+                current_ids = {
+                    chunk.chunk_id
+                    for chunk in prepared
+                    if chunk.metadata["version_id"] == version_id
                 }
-                for chunk in chunks
-            ],
-        )
+                stale_ids = [
+                    chunk_id
+                    for chunk_id in existing.get("ids", [])
+                    if chunk_id not in current_ids
+                ]
+                if stale_ids:
+                    self._collection.delete(ids=stale_ids)
+
+            self._collection.upsert(
+                ids=[chunk.chunk_id for chunk in prepared],
+                documents=[chunk.content for chunk in prepared],
+                metadatas=[
+                    self._chunk_metadata(chunk)
+                    for chunk in prepared
+                ],
+            )
+            knowledge_ids = {
+                str(chunk.metadata["knowledge_id"])
+                for chunk in prepared
+            }
+            for knowledge_id in knowledge_ids:
+                self._rebuild_version_timeline(knowledge_id)
         logger.info("知识库导入 %s 个 canonical chunks", len(chunks))
         return len(chunks)
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def list_versions(self, knowledge_id: str) -> List[Dict[str, Any]]:
+        data = self._collection.get(
+            where={"knowledge_id": knowledge_id},
+            include=["metadatas"],
+        )
+        versions: Dict[str, Dict[str, Any]] = {}
+        for metadata in data.get("metadatas", []):
+            meta = metadata or {}
+            version_id = str(meta.get("version_id", ""))
+            if version_id and version_id not in versions:
+                versions[version_id] = {
+                    key: meta.get(key)
+                    for key in (
+                        "knowledge_id",
+                        "version_id",
+                        "version",
+                        "version_seq",
+                        "status",
+                        "effective_at",
+                        "expires_at",
+                        "is_current",
+                    )
+                }
+        return sorted(
+            versions.values(),
+            key=lambda item: int(item.get("version_seq") or 0),
+            reverse=True,
+        )
+
+    def publish_version(
+        self,
+        knowledge_id: str,
+        version: str,
+        *,
+        effective_at: Optional[Any] = None,
+        expires_at: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        with self._version_lock:
+            ids, metadatas = self._find_version(knowledge_id, version)
+            updates = []
+            for metadata in metadatas:
+                updated = dict(metadata)
+                updated["status"] = KnowledgeStatus.PUBLISHED.value
+                effective = float(updated.get("effective_at", 0.0))
+                if effective_at is not None:
+                    effective = parse_timestamp(
+                        effective_at,
+                        default=effective,
+                    )
+                    updated["effective_at"] = effective
+                declared = float(updated.get(
+                    "declared_expires_at",
+                    updated.get("expires_at", MAX_TIMESTAMP),
+                ))
+                if expires_at is not None:
+                    declared = parse_timestamp(
+                        expires_at,
+                        default=MAX_TIMESTAMP,
+                    )
+                    updated["declared_expires_at"] = declared
+                    updated["expires_at"] = declared
+                if declared <= effective:
+                    raise ValueError(
+                        "expires_at must be later than effective_at",
+                    )
+                updates.append(updated)
+            self._collection.update(ids=ids, metadatas=updates)
+            self._rebuild_version_timeline(knowledge_id)
+        return self._version_detail(knowledge_id, version)
+
+    def revoke_version(
+        self,
+        knowledge_id: str,
+        version: str,
+    ) -> Dict[str, Any]:
+        with self._version_lock:
+            ids, metadatas = self._find_version(knowledge_id, version)
+            updates = []
+            for metadata in metadatas:
+                updated = dict(metadata)
+                updated["status"] = KnowledgeStatus.REVOKED.value
+                updated["is_current"] = False
+                updates.append(updated)
+            self._collection.update(ids=ids, metadatas=updates)
+            self._rebuild_version_timeline(knowledge_id)
+        return self._version_detail(knowledge_id, version)
+
+    def all_chunks(self) -> List[DocumentChunk]:
+        data = self._collection.get(include=["documents", "metadatas"])
+        return [
+            self._document_chunk(chunk_id, content, metadata or {}, index)
+            for index, (chunk_id, content, metadata) in enumerate(zip(
+                data.get("ids", []),
+                data.get("documents", []),
+                data.get("metadatas", []),
+            ))
+        ]
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        as_of: Optional[Any] = None,
+    ) -> List[Dict[str, Any]]:
         """
         语义检索：根据 query 返回最相关的文档片段。
 
         ChromaDB 内部自动将 query 转为向量，与存储的文档向量做余弦相似度匹配。
         """
+        retrieval_filter = RetrievalFilter.current(as_of=as_of)
         results = self._collection.query(
             query_texts=[query],
             n_results=top_k,
+            where=retrieval_filter.to_chroma_where(),
         )
 
         items = []
@@ -167,6 +347,8 @@ class KnowledgeBase:
                     "content":  doc,
                     "score":    round(1.0 - dist, 4),  # ChromaDB 返回距离，转为相似度
                     "chunk":    meta.get("chunk_index", 0),
+                    "knowledge_id": meta.get("knowledge_id"),
+                    "version": meta.get("version"),
                 })
 
         return items
@@ -174,6 +356,166 @@ class KnowledgeBase:
     @property
     def doc_count(self) -> int:
         return self._collection.count()
+
+    @staticmethod
+    def _chunk_metadata(chunk: DocumentChunk) -> Dict[str, Any]:
+        metadata = {
+            "source": chunk.source,
+            "title": chunk.title,
+            "section": chunk.section,
+            "page": chunk.page or 0,
+            "chunk_index": chunk.chunk_index,
+            "parent_id": chunk.parent_id,
+            **chunk.metadata,
+        }
+        metadata.setdefault(
+            "declared_expires_at",
+            metadata.get("expires_at", MAX_TIMESTAMP),
+        )
+        return metadata
+
+    @staticmethod
+    def _document_chunk(
+        chunk_id: str,
+        content: str,
+        metadata: Dict[str, Any],
+        index: int,
+    ) -> DocumentChunk:
+        reserved = {
+            "source", "title", "section", "page",
+            "chunk_index", "parent_id",
+        }
+        return DocumentChunk(
+            chunk_id=chunk_id,
+            content=content,
+            source=str(metadata.get("source", "knowledge_base")),
+            title=str(metadata.get("title", "")),
+            section=str(metadata.get("section", "")),
+            page=int(metadata.get("page") or 0) or None,
+            chunk_index=int(metadata.get("chunk_index", index)),
+            parent_id=str(
+                metadata.get("parent_id") or f"document-{chunk_id}"
+            ),
+            metadata={
+                key: value
+                for key, value in metadata.items()
+                if key not in reserved
+            },
+        )
+
+    def _find_version(
+        self,
+        knowledge_id: str,
+        version: str,
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        data = self._collection.get(
+            where={"$and": [
+                {"knowledge_id": {"$eq": knowledge_id}},
+                {"version": {"$eq": version}},
+            ]},
+            include=["metadatas"],
+        )
+        ids = list(data.get("ids", []))
+        if not ids:
+            raise KeyError(f"knowledge version not found: {knowledge_id}:{version}")
+        return ids, [dict(value or {}) for value in data.get("metadatas", [])]
+
+    def _version_detail(
+        self,
+        knowledge_id: str,
+        version: str,
+    ) -> Dict[str, Any]:
+        return next(
+            item
+            for item in self.list_versions(knowledge_id)
+            if item["version"] == version
+        )
+
+    def _rebuild_version_timeline(self, knowledge_id: str) -> None:
+        data = self._collection.get(
+            where={"knowledge_id": knowledge_id},
+            include=["metadatas"],
+        )
+        grouped: Dict[str, List[tuple[str, Dict[str, Any]]]] = defaultdict(list)
+        for chunk_id, metadata in zip(
+            data.get("ids", []),
+            data.get("metadatas", []),
+        ):
+            meta = dict(metadata or {})
+            grouped[str(meta.get("version_id", ""))].append((chunk_id, meta))
+
+        published = [
+            values
+            for values in grouped.values()
+            if values
+            and values[0][1].get("status")
+            == KnowledgeStatus.PUBLISHED.value
+        ]
+        published.sort(key=lambda values: (
+            float(values[0][1].get("effective_at", 0.0)),
+            int(values[0][1].get("version_seq", 0)),
+        ))
+        updates: Dict[str, Dict[str, Any]] = {}
+        for index, version_chunks in enumerate(published):
+            next_effective = (
+                float(published[index + 1][0][1]["effective_at"])
+                if index + 1 < len(published)
+                else MAX_TIMESTAMP
+            )
+            for chunk_id, metadata in version_chunks:
+                declared = float(
+                    metadata.get(
+                        "declared_expires_at",
+                        metadata.get("expires_at", MAX_TIMESTAMP),
+                    ),
+                )
+                metadata["expires_at"] = min(declared, next_effective)
+                metadata["is_current"] = index == len(published) - 1
+                updates[chunk_id] = metadata
+        for version_chunks in grouped.values():
+            for chunk_id, metadata in version_chunks:
+                if chunk_id not in updates:
+                    metadata["is_current"] = False
+                    updates[chunk_id] = metadata
+        if updates:
+            self._collection.update(
+                ids=list(updates),
+                metadatas=list(updates.values()),
+            )
+
+    def _migrate_legacy_metadata(self) -> None:
+        if not hasattr(self._collection, "update"):
+            return
+        data = self._collection.get(include=["metadatas"])
+        ids = []
+        updates = []
+        for chunk_id, metadata in zip(
+            data.get("ids", []),
+            data.get("metadatas", []),
+        ):
+            meta = dict(metadata or {})
+            if "version_id" in meta:
+                continue
+            normalized = normalize_knowledge_metadata(
+                {
+                    **meta,
+                    "effective_at": 0.0,
+                    "created_at": 0.0,
+                },
+                source=str(meta.get("source", "legacy")),
+                title=str(meta.get("title", "")),
+                now=0.0,
+            )
+            normalized.update({
+                key: value
+                for key, value in meta.items()
+                if key not in normalized
+            })
+            normalized.setdefault("declared_expires_at", MAX_TIMESTAMP)
+            ids.append(chunk_id)
+            updates.append(normalized)
+        if ids:
+            self._collection.update(ids=ids, metadatas=updates)
 
     # ── MCP 工具 handler ─────────────────────────────────────────────────────
 
@@ -189,7 +531,11 @@ class KnowledgeBase:
         """
         query = params.get("query", "")
         top_k = params.get("top_k", 5)
-        return self.search(query, top_k=top_k)
+        return self.search(
+            query,
+            top_k=top_k,
+            as_of=params.get("as_of"),
+        )
 
     # ── 内部方法 ──────────────────────────────────────────────────────────────
 

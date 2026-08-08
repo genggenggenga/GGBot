@@ -49,6 +49,10 @@ class Citation(BaseModel):
     title: str = ""
     section: str = ""
     page: Optional[int] = None
+    knowledge_id: Optional[str] = None
+    version: Optional[str] = None
+    effective_at: Optional[float] = None
+    expires_at: Optional[float] = None
 
 
 class RetrievalResult(BaseModel):
@@ -59,3 +63,31 @@ class RetrievalResult(BaseModel):
     citations: List[Citation] = Field(default_factory=list)
     answered: bool
     reason: Optional[str] = None
+    queries: List[str] = Field(default_factory=list)
+
+
+class QueryPlan(BaseModel):
+    """Validated output of reference resolution and multi-query rewriting."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    original_query: str
+    standalone_query: str
+    alternative_queries: List[str] = Field(default_factory=list)
+    resolved_references: Dict[str, str] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    used_llm: bool = False
+    fallback_reason: Optional[str] = None
+
+    def retrieval_queries(self, max_queries: int = 3) -> List[str]:
+        values = [
+            self.original_query,
+            self.standalone_query,
+            *self.alternative_queries,
+        ]
+        queries = []
+        for value in values:
+            normalized = value.strip()
+            if normalized and normalized not in queries:
+                queries.append(normalized)
+        return queries[:max_queries]

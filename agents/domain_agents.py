@@ -12,6 +12,7 @@ from core.agent_models import (
     get_intent_schema,
 )
 from core.tool_registry import ToolRegistry
+from rag.query_planner import QueryPlanner
 
 
 KNOWLEDGE_AGENT = "knowledge"
@@ -543,8 +544,13 @@ class KnowledgeAgent:
     name = KNOWLEDGE_AGENT
     allowed_tools = ("rag_search",)
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        query_planner: Optional[QueryPlanner] = None,
+    ) -> None:
         self._registry = registry
+        self._query_planner = query_planner
         self._registry.set_agent_whitelist(self.name, set(self.allowed_tools))
 
     @staticmethod
@@ -573,6 +579,7 @@ class KnowledgeAgent:
         state: DialogueState,
         message: str,
         context: str = "",
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> AgentResult:
         deterministic = {
             "greeting": "你好，我可以帮你查询订单、物流，或处理退款相关问题。",
@@ -585,11 +592,35 @@ class KnowledgeAgent:
                 success=True,
                 response=deterministic[state.active_intent],
             )
+        planner = self._query_planner or QueryPlanner(enabled=False)
+        plan = await planner.plan(
+            message,
+            history=history,
+            dialogue_state=state.model_dump(mode="json"),
+        )
+        primary_text = (
+            plan.original_query
+            if planner.max_queries == 1
+            else plan.standalone_query
+        )
+        primary_query = self._contextual_query(
+            primary_text,
+            context,
+        )
+        queries = [primary_query]
+        for query in [
+            plan.original_query,
+            *plan.alternative_queries,
+        ]:
+            if query not in queries:
+                queries.append(query)
+        queries = queries[:planner.max_queries]
         result = await self._registry.call(
             self.name,
             "rag_search",
             {
-                "query": self._contextual_query(message, context),
+                "query": primary_query,
+                "queries": queries,
                 "mode": "rerank",
             },
             context={"prompt_context": context} if context else None,
@@ -653,6 +684,7 @@ class DomainAgentRuntime:
         message: str,
         intents: Optional[Sequence[str]] = None,
         context: str = "",
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> tuple[str, List[AgentResult]]:
         results = []
         goals = list(intents or [state.active_intent or "other"])
@@ -662,7 +694,14 @@ class DomainAgentRuntime:
             assignments.setdefault(target, []).append(goal)
         for target, target_goals in assignments.items():
             agent = self._agents[target]
-            if context:
+            if target == KNOWLEDGE_AGENT:
+                result = await agent.execute(
+                    state,
+                    message,
+                    context,
+                    history=history,
+                )
+            elif context:
                 result = await agent.execute(state, message, context)
             else:
                 result = await agent.execute(state, message)

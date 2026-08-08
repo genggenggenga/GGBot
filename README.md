@@ -73,6 +73,9 @@ RAG 链路由 ChromaDB Dense、独立 BM25、RRF、Cross-Encoder Reranker 和 Ci
 ```bash
 export RAG_CHUNK_SIZE_TOKENS=500
 export RAG_CHUNK_OVERLAP_TOKENS=80
+export RAG_MULTI_QUERY_ENABLED=true
+export RAG_MULTI_QUERY_MAX_QUERIES=3
+export RAG_QUERY_REWRITE_MIN_CONFIDENCE=0.5
 ```
 
 修改参数只影响新导入或重新索引的文档。Chunking 黄金评测集位于 `data/eval/rag_chunking_cases.json`，实际执行文档解析、切片和 BM25 检索：
@@ -87,6 +90,32 @@ curl -s -X POST http://localhost:8000/eval/run \
   -d '{"mode":"customer_agent"}'
 curl -s http://localhost:8000/traces/<trace_id>
 ```
+
+KnowledgeAgent 会在一次结构化 LLM 调用中完成指代消解与 Multi-Query 改写，保留原始问题，并将最多 3 条查询分别执行 Dense/BM25 召回；候选跨查询 RRF 融合后只执行一次 Reranker。模型调用失败、置信度不足或修改了错误码/数字等硬实体时，自动回退原问题。
+
+知识导入支持版本和生效区间：
+
+```bash
+curl -s -X POST http://localhost:8000/knowledge/add \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "documents": [{
+      "title": "退款政策",
+      "content": "退款将在审核通过后原路退回。",
+      "knowledge_id": "refund-policy",
+      "version": "v2",
+      "effective_at": "2026-08-08T00:00:00Z"
+    }]
+  }'
+
+curl -s http://localhost:8000/knowledge/refund-policy/versions
+curl -s -X POST \
+  http://localhost:8000/knowledge/refund-policy/versions/v2/revoke
+curl -s -X POST \
+  'http://localhost:8000/search?query=退款政策&as_of=2026-08-08T00:00:00Z'
+```
+
+同一 `knowledge_id` 的已发布版本会按 `effective_at` 自动形成不重叠时间线。旧版本保留用于审计和历史检索，`draft`、`revoked` 以及查询时间点未生效或已失效的版本不会参与召回。
 
 最新本地确定性评测报告位于 `data/eval/eval_report.md`。该报告实际逐条执行 50 条固定样本，结果如下：
 

@@ -29,6 +29,7 @@ from core.tool_registry import (
     ToolSpec,
     ToolType,
 )
+from rag.query_planner import QueryPlanner
 
 
 def run(coro):
@@ -405,6 +406,43 @@ def test_knowledge_agent_uses_skill_and_memory_context_in_retrieval_query():
     assert "用户此前询问退款到账" in queries[0]
     assert "上次退款使用原支付渠道" in queries[0]
     assert "language" in queries[0]
+
+
+def test_knowledge_agent_sends_bounded_multi_query_plan_to_rag():
+    registry = ToolRegistry()
+    params_seen = []
+
+    async def rag_search(params, context):
+        params_seen.append(params)
+        return {
+            "answered": True,
+            "hits": [{"chunk": {"content": "退款到账需要五个工作日"}}],
+            "citations": [{"citation_id": "[1]", "source": "policy.md"}],
+        }
+
+    async def llm_call(prompt):
+        return """{
+          "standalone_query": "退款审核通过后多久到账",
+          "alternative_queries": ["退款到账时间", "退款原路退回周期"],
+          "resolved_references": {"它": "退款款项"},
+          "confidence": 0.95
+        }"""
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    planner = QueryPlanner(llm_call, max_queries=3)
+    result = run(KnowledgeAgent(registry, planner).execute(
+        DialogueState(active_intent="refund_policy"),
+        "它多久到账",
+        history=[{"role": "user", "content": "退款已经审核通过"}],
+    ))
+
+    assert result.success
+    assert params_seen[0]["query"] == "退款审核通过后多久到账"
+    assert params_seen[0]["queries"] == [
+        "退款审核通过后多久到账",
+        "它多久到账",
+        "退款到账时间",
+    ]
 
 
 @pytest.mark.parametrize(

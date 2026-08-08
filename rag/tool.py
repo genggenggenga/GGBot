@@ -4,6 +4,7 @@ from typing import Iterable, Optional
 
 from core.tool_registry import LocalToolAdapter, ToolRegistry, ToolSpec, ToolType
 from rag.retriever import HybridRetriever
+from rag.versioning import RetrievalFilter
 
 
 def register_rag_tool(
@@ -15,14 +16,29 @@ def register_rag_tool(
     async def search_handler(params, context):
         del context
         mode = params.get("mode", "rerank")
-        result = await asyncio.to_thread(
-            retriever.search,
-            params["query"],
-            top_k=params.get("top_k", 5),
-            candidate_k=params.get("candidate_k", 20),
-            use_sparse=mode != "dense",
-            use_reranker=mode == "rerank",
-        )
+        queries = params.get("queries") or [params["query"]]
+        filters = RetrievalFilter.current(as_of=params.get("as_of"))
+        search_multi = getattr(retriever, "search_multi", None)
+        if search_multi is not None:
+            result = await asyncio.to_thread(
+                search_multi,
+                queries,
+                rerank_query=params["query"],
+                top_k=params.get("top_k", 5),
+                candidate_k=params.get("candidate_k", 20),
+                use_sparse=mode != "dense",
+                use_reranker=mode == "rerank",
+                filters=filters,
+            )
+        else:
+            result = await asyncio.to_thread(
+                retriever.search,
+                params["query"],
+                top_k=params.get("top_k", 5),
+                candidate_k=params.get("candidate_k", 20),
+                use_sparse=mode != "dense",
+                use_reranker=mode == "rerank",
+            )
         return result.model_dump(mode="json")
 
     spec = ToolSpec(
@@ -32,6 +48,13 @@ def register_rag_tool(
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "as_of": {
+                    "type": ["string", "number"],
+                },
                 "top_k": {"type": "integer"},
                 "candidate_k": {"type": "integer"},
                 "mode": {

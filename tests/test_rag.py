@@ -11,6 +11,7 @@ from rag.models import DocumentChunk, SearchHit
 from rag.retriever import HybridRetriever, reciprocal_rank_fusion
 from rag.tokenization import count_tokens
 from rag.tool import register_rag_tool
+from rag.versioning import RetrievalFilter
 
 
 def make_chunk(
@@ -243,6 +244,98 @@ def test_hybrid_retriever_reranks_and_builds_citations():
     assert result.hits[0].rerank_score == 0.9
     assert result.citations[0].citation_id == "[1]"
     assert result.citations[0].section == "退款 > 期限"
+
+
+def test_multi_query_fuses_candidates_and_reranks_once():
+    a = make_chunk("a", "退款到账时间")
+    b = make_chunk("b", "退款原路退回周期")
+
+    class QueryIndex:
+        def __init__(self):
+            self.queries = []
+
+        def search(self, query, top_k, filters=None):
+            self.queries.append(query)
+            hit = a if "到账" in query else b
+            return [SearchHit(
+                chunk=hit,
+                score=0.8,
+                dense_score=0.8,
+            )]
+
+    class CountingReranker:
+        def __init__(self):
+            self.calls = 0
+            self.query = None
+
+        def score(self, query, chunks):
+            self.calls += 1
+            self.query = query
+            return [0.9 if chunk.chunk_id == "b" else 0.7 for chunk in chunks]
+
+    dense = QueryIndex()
+    reranker = CountingReranker()
+    retriever = HybridRetriever(dense, BM25Index(), reranker=reranker)
+
+    result = retriever.search_multi(
+        ["退款多久到账", "退款原路退回"],
+        rerank_query="退款到账周期",
+        use_sparse=False,
+    )
+
+    assert dense.queries == ["退款多久到账", "退款原路退回"]
+    assert reranker.calls == 1
+    assert reranker.query == "退款到账周期"
+    assert result.hits[0].chunk.chunk_id == "b"
+    assert result.queries == ["退款多久到账", "退款原路退回"]
+
+
+def test_bm25_filters_knowledge_by_status_and_time():
+    current = make_chunk("current", "当前退款政策")
+    current.metadata.update({
+        "knowledge_id": "refund-policy",
+        "version": "v2",
+        "version_id": "refund-policy:v2",
+        "status": "published",
+        "is_current": True,
+        "effective_at": 200.0,
+        "expires_at": 400.0,
+    })
+    expired = make_chunk("expired", "旧退款政策")
+    expired.metadata.update({
+        "knowledge_id": "refund-policy",
+        "version": "v1",
+        "version_id": "refund-policy:v1",
+        "status": "published",
+        "is_current": False,
+        "effective_at": 100.0,
+        "expires_at": 200.0,
+    })
+    draft = make_chunk("draft", "草稿退款政策")
+    draft.metadata.update({
+        "knowledge_id": "refund-policy",
+        "version": "v3",
+        "version_id": "refund-policy:v3",
+        "status": "draft",
+        "effective_at": 300.0,
+        "expires_at": 500.0,
+    })
+    index = BM25Index()
+    index.add([current, expired, draft])
+
+    historical = index.search(
+        "退款政策",
+        5,
+        filters=RetrievalFilter.current(as_of=150.0),
+    )
+    active = index.search(
+        "退款政策",
+        5,
+        filters=RetrievalFilter.current(as_of=250.0),
+    )
+
+    assert [hit.chunk.chunk_id for hit in historical] == ["expired"]
+    assert [hit.chunk.chunk_id for hit in active] == ["current"]
 
 
 def test_dense_only_mode_does_not_call_sparse():

@@ -117,6 +117,7 @@ class CustomerAgentRuntime:
         turn_data: Dict[str, Any] = {
             "message": message,
             "agent_context": agent_context,
+            "history": history,
             "agent": self._router.route(dialogue_state),
             "intents": execution_intents,
             "results": [],
@@ -260,6 +261,7 @@ class CustomerAgentRuntime:
                 turn_data["message"],
                 intents=turn_data["intents"],
                 context=turn_data["agent_context"],
+                history=turn_data["history"],
             )
             turn_data["results"].extend(results)
             observations = [

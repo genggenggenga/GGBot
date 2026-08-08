@@ -213,19 +213,25 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 ![Hybrid RAG](../diagrams/2026-08-07T100005/diagram.png)
 
-`Loader → Structure-aware Chunking → Dense + BM25 → RRF → Cross-Encoder → Citation`
+`Loader → Version Timeline → QueryPlanner → Multi-Query Dense + BM25 → RRF → Cross-Encoder → Citation`
 
 | 阶段       | 实现                                                                    |
 | ---------- | ----------------------------------------------------------------------- |
 | 文档解析   | 支持 TXT、Markdown、PDF 和 JSON；保留 Markdown 标题路径与 PDF 页码      |
 | 切片       | 模型无关 token 预算，默认 chunk_size=500、overlap=80；参数可通过环境变量调整，并使用内容哈希生成 chunk_id 与 parent_id |
+| 查询规划   | 一次结构化 LLM 调用完成指代消解、独立问题生成和最多 3 条 Multi-Query；失败时回退原问题 |
+| 版本时间   | knowledge_id/version/status/effective_at/expires_at 构成不重叠发布区间，支持当前与 as_of 历史检索 |
 | 双路召回   | ChromaDB + BGE Dense，与进程内 BM25 并行检索                            |
-| 融合与重排 | RRF 默认 k=60，可选 `BAAI/bge-reranker-v2-m3`                           |
-| 引用与拒答 | 返回 source、title、section、page、chunk_id；无相关证据时拒绝回答       |
+| 融合与重排 | 每条 Query 分别召回，跨 Query RRF 去重融合后只执行一次 `BAAI/bge-reranker-v2-m3` |
+| 引用与拒答 | 返回 source、title、section、page、chunk_id、knowledge_id 和 version；无相关证据时拒绝回答 |
 
 **导入阶段保持结构信息。** `load_document()` 按文件类型分发：TXT 作为单节；Markdown 按标题层级构造 section path；PDF 逐页提取并记录 page。`chunk_sections()` 使用段落、换行、中文标点和空格递归切分，再按模型无关 token 单元执行硬预算与 overlap，避免简单定长截断破坏全部语义边界。`RAG_CHUNK_SIZE_TOKENS` 与 `RAG_CHUNK_OVERLAP_TOKENS` 只影响新导入或重新索引的文档。
 
 **Canonical chunk store 消除双重索引漂移。** KnowledgeBase 的 Chroma collection 保存统一 chunk_id、正文以及 source / title / section / page / metadata。KnowledgeRuntime 直接复用这个 collection 做 Dense 检索，并从同一批 DocumentChunk 构建 BM25；导入时优先调用 `add_chunks()`，不再创建第二套 Dense collection 或在启动时重复 Embedding。
+
+**QueryPlanner 合并指代消解与 Multi-Query。** KnowledgeAgent 将最近 5 条消息、active_intent 和结构化 slots 交给 QueryPlanner，一次调用返回 standalone_query、候选查询和 resolved_references。系统校验订单号、错误码和数字等硬实体没有被删除；模型失败、输出非法或低于置信度阈值时保留原问题。原问题始终参与召回，避免改写偏移造成零召回。
+
+**版本时间线保留历史但隔离召回。** 每个逻辑知识使用稳定 knowledge_id，每个版本使用唯一 version_id；effective_at 与 expires_at 采用 UTC epoch 和左闭右开区间。同一知识的已发布版本按生效时间自动闭合前一版本，draft/revoked 或查询时间点无效的 Chunk 在 Dense 与 BM25 两路检索前被过滤。旧版本不物理删除，可通过 `/search?as_of=...` 重放历史口径。
 
 **Dense 负责语义相似，BM25 负责精确词项。** Dense 使用 Chroma cosine distance 转换为相似度，适合语义改写；BM25 使用英文 token 与中文单字 token，适合订单规则名、错误码和关键词命中。两路各自取 candidate_k 后进入 RRF，不直接比较两种不可同量纲的原始分数。
 
@@ -310,14 +316,14 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 Chunking 另有独立黄金评测集 `data/eval/rag_chunking_cases.json`。`evaluation/chunking_eval.py` 实际执行 `load_document → chunk_sections → BM25Index`，检查 Retrieval Hit Rate、MRR、证据完整率、Section 准确率和 token 预算违规；该评测不使用 FakeDense 或 FakeReranker，也不代表真实向量模型效果。
 
-全量 pytest 覆盖状态转移、跨轮恢复、确认门禁、MCP initialize/list/call、退款与工单幂等、RAG Loader/索引/融合、记忆压缩与画像门控、主链路监控、后台任务 drain、Trace allowlist 和 API 回归。当前验证结果为 282 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
+全量 pytest 覆盖状态转移、跨轮恢复、确认门禁、MCP initialize/list/call、退款与工单幂等、RAG Loader/索引/融合、QueryPlanner、知识版本时间线、记忆压缩与画像门控、主链路监控、后台任务 drain、Trace allowlist 和 API 回归。当前验证结果为 294 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
 
 ## 6. API 与部署形态
 
 | 领域 | 接口                                                 | 用途                            |
 | ---- | ---------------------------------------------------- | ------------------------------- |
 | 对话 | `POST /chat`<br>`POST /search`<br>`GET /traces/{trace_id}` | 执行主链路、统一检索并查询公开 Trace |
-| 知识 | `POST /knowledge/add`<br>`POST /knowledge/upload`    | 导入文本、Markdown、PDF 或 JSON |
+| 知识 | `POST /knowledge/add`<br>`POST /knowledge/upload`<br>`GET /knowledge/{knowledge_id}/versions`<br>`POST /knowledge/{knowledge_id}/versions/{version}/publish`<br>`POST /knowledge/{knowledge_id}/versions/{version}/revoke` | 导入知识并管理版本发布、撤销和时间线 |
 | 运营 | `GET /skills`<br>`POST /skills/reload`               | 查看和热加载业务 Skill          |
 | 质量 | `POST /eval/run`<br>`GET /health`<br>`GET /monitor`<br>`GET /metrics` | 就绪检查、评测、监控与指标 |
 
@@ -342,6 +348,9 @@ MCPClient 使用当前 Python 解释器拉起 `python -m mcp_server.customer_ser
 | `RAG_RERANK_THRESHOLD`       | Cross-Encoder 重排后的证据阈值                           |
 | `RAG_CHUNK_SIZE_TOKENS`      | 新导入文档的最大 chunk token 预算                        |
 | `RAG_CHUNK_OVERLAP_TOKENS`   | 新导入文档的相邻 chunk 重叠 token 预算                   |
+| `RAG_MULTI_QUERY_ENABLED`     | 是否启用指代消解与 Multi-Query QueryPlanner              |
+| `RAG_MULTI_QUERY_MAX_QUERIES` | 单次知识检索允许的最大查询数量，默认 3                   |
+| `RAG_QUERY_REWRITE_MIN_CONFIDENCE` | 接受 LLM 问题改写的最低置信度                       |
 | `GGBOT_SKILLS_DIR`           | 业务 Skill 的扫描目录，支持运行时 reload                 |
 | `ENABLE_LEGACY_EVAL`         | 仅在显式需要时初始化旧 LLM evaluator                     |
 

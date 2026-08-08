@@ -2,17 +2,23 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Protocol, Sequence
+from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 import httpx
 
 from rag.indexes import DenseIndex
 from rag.models import Citation, DocumentChunk, RetrievalResult, SearchHit
+from rag.versioning import RetrievalFilter
 
 
 class SparseIndex(Protocol):
     def add(self, chunks: Sequence[DocumentChunk]) -> None: ...
-    def search(self, query: str, top_k: int) -> List[SearchHit]: ...
+    def search(
+        self,
+        query: str,
+        top_k: int,
+        filters: Optional[RetrievalFilter] = None,
+    ) -> List[SearchHit]: ...
 
 
 class Reranker(Protocol):
@@ -132,20 +138,68 @@ class HybridRetriever:
         candidate_k: int = 20,
         use_sparse: bool = True,
         use_reranker: bool = True,
+        filters: Optional[RetrievalFilter] = None,
     ) -> RetrievalResult:
-        dense_hits = self._dense.search(query, candidate_k)
-        if use_sparse:
-            sparse_hits = self._sparse.search(query, candidate_k)
-            candidates = reciprocal_rank_fusion(
-                dense_hits, sparse_hits, rrf_k=self._rrf_k
+        return self.search_multi(
+            [query],
+            rerank_query=query,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            use_sparse=use_sparse,
+            use_reranker=use_reranker,
+            filters=filters,
+        )
+
+    def search_multi(
+        self,
+        queries: Sequence[str],
+        *,
+        rerank_query: Optional[str] = None,
+        top_k: int = 5,
+        candidate_k: int = 20,
+        use_sparse: bool = True,
+        use_reranker: bool = True,
+        filters: Optional[RetrievalFilter] = None,
+    ) -> RetrievalResult:
+        unique_queries = list(dict.fromkeys(
+            query.strip() for query in queries if query.strip()
+        ))
+        if not unique_queries:
+            return RetrievalResult(
+                query="",
+                answered=False,
+                reason="empty_query",
             )
+        active_filter = filters or RetrievalFilter.current()
+        ranked_lists: List[Sequence[SearchHit]] = []
+        for query in unique_queries:
+            ranked_lists.append(self._search_index(
+                self._dense,
+                query,
+                candidate_k,
+                active_filter,
+            ))
+            if use_sparse:
+                ranked_lists.append(self._search_index(
+                    self._sparse,
+                    query,
+                    candidate_k,
+                    active_filter,
+                ))
+        if len(ranked_lists) == 1:
+            candidates = list(ranked_lists[0])
         else:
-            candidates = dense_hits
+            candidates = reciprocal_rank_fusion_many(
+                ranked_lists,
+                rrf_k=self._rrf_k,
+            )
 
         reranked = bool(use_reranker and self._reranker and candidates)
         if reranked:
+            ranking_query = rerank_query or unique_queries[0]
             scores = self._reranker.score(
-                query, [hit.chunk for hit in candidates]
+                ranking_query,
+                [hit.chunk for hit in candidates],
             )
             for hit, score in zip(candidates, scores):
                 hit.rerank_score = score
@@ -160,9 +214,10 @@ class HybridRetriever:
         )
         if not selected or selected[0].score < threshold:
             return RetrievalResult(
-                query=query,
+                query=rerank_query or unique_queries[0],
                 answered=False,
                 reason="no_relevant_evidence",
+                queries=unique_queries,
             )
 
         citations = [
@@ -173,15 +228,34 @@ class HybridRetriever:
                 title=hit.chunk.title,
                 section=hit.chunk.section,
                 page=hit.chunk.page,
+                knowledge_id=hit.chunk.metadata.get("knowledge_id"),
+                version=hit.chunk.metadata.get("version"),
+                effective_at=hit.chunk.metadata.get("effective_at"),
+                expires_at=hit.chunk.metadata.get("expires_at"),
             )
             for index, hit in enumerate(selected, start=1)
         ]
         return RetrievalResult(
-            query=query,
+            query=rerank_query or unique_queries[0],
             hits=selected,
             citations=citations,
             answered=True,
+            queries=unique_queries,
         )
+
+    @staticmethod
+    def _search_index(
+        index: Any,
+        query: str,
+        top_k: int,
+        filters: RetrievalFilter,
+    ) -> List[SearchHit]:
+        try:
+            return index.search(query, top_k, filters=filters)
+        except TypeError as ex:
+            if "unexpected keyword argument" not in str(ex):
+                raise
+            return index.search(query, top_k)
 
 
 def reciprocal_rank_fusion(
@@ -208,6 +282,36 @@ def reciprocal_rank_fusion(
                 setattr(existing, score_field, source_score)
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank)
 
+    for chunk_id, hit in merged.items():
+        hit.rrf_score = scores[chunk_id]
+        hit.score = scores[chunk_id]
+    return sorted(merged.values(), key=lambda hit: hit.score, reverse=True)
+
+
+def reciprocal_rank_fusion_many(
+    ranked_lists: Sequence[Sequence[SearchHit]],
+    *,
+    rrf_k: int = 60,
+) -> List[SearchHit]:
+    """Fuse any number of dense/sparse/query result lists by chunk ID."""
+    if rrf_k <= 0:
+        raise ValueError("rrf_k must be positive")
+    merged: Dict[str, SearchHit] = {}
+    scores: Dict[str, float] = {}
+    for hits in ranked_lists:
+        for rank, hit in enumerate(hits, start=1):
+            chunk_id = hit.chunk.chunk_id
+            if chunk_id not in merged:
+                merged[chunk_id] = hit.model_copy(deep=True)
+            existing = merged[chunk_id]
+            if hit.dense_score is not None:
+                existing.dense_score = hit.dense_score
+            if hit.bm25_score is not None:
+                existing.bm25_score = hit.bm25_score
+            scores[chunk_id] = (
+                scores.get(chunk_id, 0.0)
+                + 1.0 / (rrf_k + rank)
+            )
     for chunk_id, hit in merged.items():
         hit.rrf_score = scores[chunk_id]
         hit.score = scores[chunk_id]
