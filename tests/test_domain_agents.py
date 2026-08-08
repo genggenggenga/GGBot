@@ -67,6 +67,7 @@ def test_router_uses_dialogue_state_and_deduplicates_tasks():
     assert router.route(DialogueState(active_intent="order_query")) == ORDER_AGENT
     assert router.route(DialogueState(active_intent="logistics_query")) == LOGISTICS_AGENT
     assert router.route(DialogueState(active_intent="refund_request")) == AFTER_SALES_AGENT
+    assert router.route(DialogueState(active_intent="request")) == AFTER_SALES_AGENT
     assert router.route_tasks(
         DialogueState(active_intent="order_query"),
         ["order_query", "logistics_query", "order_query"],
@@ -116,6 +117,30 @@ def test_logistics_agent_runs_bounded_plan_in_order():
     assert result.success
     assert calls == ["query_order", "track_package"]
     assert [item.name for item in result.observations] == calls
+
+
+def test_logistics_agent_can_track_by_tracking_number_directly():
+    registry = ToolRegistry()
+    calls = []
+
+    async def track_package(params, context):
+        calls.append(dict(params))
+        return {"found": True, "status": "in_transit", **params}
+
+    register_tool(
+        registry,
+        "track_package",
+        track_package,
+        required=("tracking_no",),
+    )
+    result = run(LogisticsAgent(registry).execute(DialogueState(
+        active_intent="logistics_query",
+        slots={"tracking_no": "SF1234567890"},
+        required_slots=["order_id", "tracking_no"],
+    )))
+
+    assert result.success
+    assert calls == [{"tracking_no": "SF1234567890"}]
 
 
 def test_service_agent_stops_plan_over_max_steps():
@@ -509,7 +534,7 @@ def test_runtime_executes_composite_tasks_sequentially():
         def __init__(self, name):
             self.name = name
 
-        async def execute(self, state, message):
+        async def execute(self, state, message, **kwargs):
             events.append(self.name)
             return type("Result", (), {
                 "response": self.name,
@@ -528,7 +553,10 @@ def test_runtime_executes_composite_tasks_sequentially():
         },
     )
     response, _ = run(runtime.execute(
-        DialogueState(active_intent="order_query"),
+        DialogueState(
+            active_intent="order_query",
+            slots={"order_id": "ORD-1"},
+        ),
         "查订单和物流",
         ["order_query", "logistics_query"],
     ))

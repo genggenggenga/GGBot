@@ -10,6 +10,7 @@ from core.agent_models import (
     Observation,
     PendingAction,
     get_intent_schema,
+    get_missing_slots,
 )
 from core.tool_registry import ToolRegistry
 from rag.query_planner import QueryPlanner
@@ -33,6 +34,13 @@ class AgentResult:
     error: Optional[str] = None
     goal: Optional[str] = None
     goals: List[str] = field(default_factory=list)
+    missing_slots: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentTask:
+    goal: str
+    target_agent: str
 
 
 class OrderQueryOutput(BaseModel):
@@ -86,6 +94,7 @@ class Router:
         "refund_request": AFTER_SALES_AGENT,
         "return_request": AFTER_SALES_AGENT,
         "cancel_order": AFTER_SALES_AGENT,
+        "request": AFTER_SALES_AGENT,
         "complaint": AFTER_SALES_AGENT,
         "escalation": AFTER_SALES_AGENT,
         "refund_policy": KNOWLEDGE_AGENT,
@@ -183,12 +192,19 @@ class ServiceAgent:
         state: DialogueState,
         message: str = "",
         context: str = "",
+        goal: Optional[str] = None,
+        seed_observations: Optional[Sequence[Observation]] = None,
     ) -> AgentResult:
-        observations: List[Observation] = []
+        task_state = (
+            state.model_copy(update={"active_intent": goal}, deep=True)
+            if goal
+            else state
+        )
+        observations = list(seed_observations or [])
         for _ in range(self._max_steps):
-            action = self.next_action(state, message, observations)
+            action = self.next_action(task_state, message, observations)
             if action is None:
-                return self.finish(state, observations)
+                return self.finish(task_state, observations)
             tool_name, params, action_id = action
             result = await self._registry.call(
                 self.name,
@@ -209,7 +225,7 @@ class ServiceAgent:
                     error=result.error,
                 )
 
-        if self.next_action(state, message, observations) is not None:
+        if self.next_action(task_state, message, observations) is not None:
             return AgentResult(
                 agent=self.name,
                 success=False,
@@ -218,7 +234,7 @@ class ServiceAgent:
                 completed=False,
                 error="max_steps_exceeded",
             )
-        return self.finish(state, observations)
+        return self.finish(task_state, observations)
 
     def next_action(
         self,
@@ -289,9 +305,16 @@ class LogisticsAgent(ServiceAgent):
     def next_action(self, state, message, observations):
         del message
         order_id = state.slots.get("order_id")
+        tracking_no = state.slots.get("tracking_no")
         if not observations:
+            if tracking_no and not order_id:
+                return "track_package", {"tracking_no": tracking_no}, None
             return "query_order", {"order_id": order_id}, None
-        if len(observations) == 1 and observations[0].data.get("found", True):
+        if (
+            len(observations) == 1
+            and observations[0].name == "query_order"
+            and observations[0].data.get("found", True)
+        ):
             return "track_package", {"order_id": order_id}, None
         return None
 
@@ -354,31 +377,43 @@ class AfterSalesAgent(ServiceAgent):
         state: DialogueState,
         message: str = "",
         context: str = "",
+        goal: Optional[str] = None,
+        seed_observations: Optional[Sequence[Observation]] = None,
     ) -> AgentResult:
-        if state.active_intent in {"complaint", "escalation"}:
-            return await self._execute_handoff(state, message, context)
-        if state.active_intent != "refund_request":
+        task_state = (
+            state.model_copy(update={"active_intent": goal}, deep=True)
+            if goal
+            else state
+        )
+        if task_state.active_intent in {"complaint", "escalation"}:
+            return await self._execute_handoff(task_state, message, context)
+        if task_state.active_intent != "refund_request":
             return AgentResult(
                 agent=self.name,
                 success=True,
                 response=self._UNIMPLEMENTED_RESPONSES.get(
-                    state.active_intent or "",
+                    task_state.active_intent or "",
                     "当前版本尚未实现该售后操作，请转人工客服继续处理。",
                 ),
                 completed=False,
             )
         if (
-            state.pending_action is not None
-            and state.confirmation_status == ConfirmationStatus.PENDING
+            task_state.pending_action is not None
+            and task_state.confirmation_status == ConfirmationStatus.PENDING
         ):
             return AgentResult(
                 agent=self.name,
                 success=True,
                 response="请确认是否提交退款申请。",
-                pending_action=state.pending_action,
+                pending_action=task_state.pending_action,
                 completed=False,
             )
-        return await super().execute(state, message, context)
+        return await super().execute(
+            task_state,
+            message,
+            context,
+            seed_observations=seed_observations,
+        )
 
     async def _execute_handoff(
         self,
@@ -580,23 +615,29 @@ class KnowledgeAgent:
         message: str,
         context: str = "",
         history: Optional[List[Dict[str, str]]] = None,
+        goal: Optional[str] = None,
     ) -> AgentResult:
+        task_state = (
+            state.model_copy(update={"active_intent": goal}, deep=True)
+            if goal
+            else state
+        )
         deterministic = {
             "greeting": "你好，我可以帮你查询订单、物流，或处理退款相关问题。",
             "feedback": "感谢你的反馈，我已记录你的意见。",
             "other": "请说明你需要查询订单、物流，还是咨询退款政策。",
         }
-        if state.active_intent in deterministic:
+        if task_state.active_intent in deterministic:
             return AgentResult(
                 agent=self.name,
                 success=True,
-                response=deterministic[state.active_intent],
+                response=deterministic[task_state.active_intent],
             )
         planner = self._query_planner or QueryPlanner(enabled=False)
         plan = await planner.plan(
             message,
             history=history,
-            dialogue_state=state.model_dump(mode="json"),
+            dialogue_state=task_state.model_dump(mode="json"),
         )
         primary_text = (
             plan.original_query
@@ -686,30 +727,84 @@ class DomainAgentRuntime:
         context: str = "",
         history: Optional[List[Dict[str, str]]] = None,
     ) -> tuple[str, List[AgentResult]]:
-        results = []
-        goals = list(intents or [state.active_intent or "other"])
-        assignments: Dict[str, List[str]] = {}
-        for goal in goals:
-            target = self._router.route_intent(goal, state)
-            assignments.setdefault(target, []).append(goal)
-        for target, target_goals in assignments.items():
-            agent = self._agents[target]
-            if target == KNOWLEDGE_AGENT:
+        results: List[AgentResult] = []
+        goals = list(dict.fromkeys(
+            intents or [state.active_intent or "other"],
+        ))
+        tasks = [
+            AgentTask(
+                goal=goal,
+                target_agent=self._router.route_intent(goal, state),
+            )
+            for goal in goals
+        ]
+        working_state = state
+        shared_order_observations: Dict[str, Observation] = {}
+
+        for task in tasks:
+            missing_slots = get_missing_slots(task.goal, working_state.slots)
+            if missing_slots:
+                results.append(AgentResult(
+                    agent=task.target_agent,
+                    success=True,
+                    response=(
+                        "请提供订单号或物流单号。"
+                        if task.goal == "logistics_query"
+                        else f"请补充 {missing_slots[0]}。"
+                    ),
+                    completed=False,
+                    goal=task.goal,
+                    goals=[task.goal],
+                    missing_slots=missing_slots,
+                ))
+                break
+
+            agent = self._agents[task.target_agent]
+            order_id = working_state.slots.get("order_id")
+            seed = (
+                [shared_order_observations[order_id]]
+                if order_id in shared_order_observations
+                and task.target_agent != KNOWLEDGE_AGENT
+                else []
+            )
+            if task.target_agent == KNOWLEDGE_AGENT:
                 result = await agent.execute(
-                    state,
+                    working_state,
                     message,
                     context,
                     history=history,
+                    goal=task.goal,
                 )
-            elif context:
-                result = await agent.execute(state, message, context)
             else:
-                result = await agent.execute(state, message)
-            result.goal = target_goals[0]
-            result.goals = target_goals
-            result.completed = all(
-                self._completion.is_complete(goal, result)
-                for goal in target_goals
+                result = await agent.execute(
+                    working_state,
+                    message,
+                    context=context,
+                    goal=task.goal,
+                    seed_observations=seed,
+                )
+            result.goal = task.goal
+            result.goals = [task.goal]
+            result.completed = self._completion.is_complete(
+                task.goal,
+                result,
             )
             results.append(result)
+            for observation in result.observations:
+                if (
+                    observation.name == "query_order"
+                    and observation.success
+                    and isinstance(observation.data, dict)
+                    and observation.data.get("order_id")
+                ):
+                    shared_order_observations[
+                        observation.data["order_id"]
+                    ] = observation
+            if result.pending_action is not None or not result.success:
+                break
+            if working_state.pending_action is not None:
+                working_state = working_state.model_copy(update={
+                    "pending_action": None,
+                    "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
+                })
         return self._composer.compose(results), results

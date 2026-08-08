@@ -23,6 +23,11 @@ class ConfirmationStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class SlotMode(str, Enum):
+    ALL = "all"
+    ANY = "any"
+
+
 class ExecutionState(str, Enum):
     UNDERSTANDING = "understanding"
     CLARIFYING = "clarifying"
@@ -98,6 +103,7 @@ class DialogueState(BaseModel):
     pending_action: Optional[PendingAction] = None
     confirmation_status: ConfirmationStatus = ConfirmationStatus.NOT_REQUIRED
     completed_goals: List[str] = Field(default_factory=list)
+    queued_goals: List[str] = Field(default_factory=list)
     last_agent: Optional[str] = None
     state_version: int = Field(default=0, ge=0)
 
@@ -156,6 +162,7 @@ class IntentSchema(BaseModel):
 
     intent: str = Field(min_length=1)
     required_slots: tuple[str, ...] = ()
+    slot_mode: SlotMode = SlotMode.ALL
     allowed_agents: tuple[str, ...] = Field(min_length=1)
     completion_condition: str = Field(min_length=1)
 
@@ -165,10 +172,12 @@ def _intent(
     agents: tuple[str, ...],
     completion_condition: str,
     required_slots: tuple[str, ...] = (),
+    slot_mode: SlotMode = SlotMode.ALL,
 ) -> IntentSchema:
     return IntentSchema(
         intent=name,
         required_slots=required_slots,
+        slot_mode=slot_mode,
         allowed_agents=agents,
         completion_condition=completion_condition,
     )
@@ -198,7 +207,8 @@ INTENT_SCHEMAS: Mapping[str, IntentSchema] = MappingProxyType({
         "logistics_query",
         ("logistics",),
         "logistics_fact_returned",
-        ("order_id",),
+        ("order_id", "tracking_no"),
+        SlotMode.ANY,
     ),
     "refund_policy": _intent(
         "refund_policy",
@@ -232,3 +242,18 @@ def get_intent_schema(intent: str) -> IntentSchema:
         return INTENT_SCHEMAS[intent]
     except KeyError as ex:
         raise ValueError(f"unsupported intent: {intent}") from ex
+
+
+def get_missing_slots(intent: str, slots: Mapping[str, Any]) -> List[str]:
+    """Return unsatisfied slot requirements for an intent."""
+    schema = get_intent_schema(intent)
+    if schema.slot_mode == SlotMode.ANY:
+        return (
+            []
+            if any(slots.get(slot) for slot in schema.required_slots)
+            else list(schema.required_slots)
+        )
+    return [
+        slot for slot in schema.required_slots
+        if not slots.get(slot)
+    ]

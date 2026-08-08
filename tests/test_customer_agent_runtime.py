@@ -36,8 +36,10 @@ def register_tool(
     handler,
     *,
     required=("order_id",),
+    fields=None,
     tool_type=ToolType.READ,
 ):
+    fields = fields or required
     registry.register(LocalToolAdapter(
         ToolSpec(
             name=name,
@@ -46,7 +48,7 @@ def register_tool(
                 "type": "object",
                 "properties": {
                     field: {"type": "string"}
-                    for field in required
+                    for field in fields
                 },
                 "required": list(required),
             },
@@ -103,7 +105,13 @@ def build_runtime(*, eligible=True, fail_query=False):
         }
 
     register_tool(registry, "query_order", query_order)
-    register_tool(registry, "track_package", track_package)
+    register_tool(
+        registry,
+        "track_package",
+        track_package,
+        required=(),
+        fields=("order_id", "tracking_no"),
+    )
     register_tool(registry, "check_refund_eligibility", check_refund)
     register_tool(
         registry,
@@ -201,13 +209,117 @@ def test_runtime_executes_all_structured_intents_and_composes_response():
     assert result.agent_type == "order,logistics"
     assert "订单 ORD-1001" in result.response
     assert "当前物流状态" in result.response
-    assert [name for name, _ in calls] == [
-        "query_order",
-        "query_order",
-        "track_package",
-    ]
+    assert [name for name, _ in calls] == ["query_order", "track_package"]
     state = run(store.load("user-1", "conv-composite"))
     assert state.completed_goals == ["order_query", "logistics_query"]
+
+
+def test_runtime_tracks_package_by_tracking_number_without_order_lookup():
+    runtime, _, calls, _ = build_runtime()
+
+    result = run(runtime.run(
+        "user-1",
+        "conv-tracking",
+        "查快递 SF1234567890",
+    ))
+
+    assert result.status == "completed"
+    assert [name for name, _ in calls] == ["track_package"]
+    assert calls[0][1] == {"tracking_no": "SF1234567890"}
+
+
+def test_runtime_clarifies_low_confidence_without_updating_state():
+    runtime, store, calls, _ = build_runtime()
+
+    class LowConfidenceRecognizer:
+        async def recognize_structured(
+            self,
+            message,
+            history=None,
+            current_state=None,
+        ):
+            return UnderstandingResult(
+                intents=["refund_request"],
+                primary_intent="refund_request",
+                confidence=0.4,
+            )
+
+    runtime._recognizer = LowConfidenceRecognizer()
+    result = run(runtime.run("user-1", "conv-low", "可能要处理一下"))
+
+    assert result.status == "awaiting_user"
+    assert "不能确定" in result.response
+    assert run(store.load("user-1", "conv-low")).active_intent is None
+    assert calls == []
+
+
+def test_runtime_switches_clear_new_goal_without_switch_words():
+    runtime, store, _, _ = build_runtime()
+
+    run(runtime.run("user-1", "conv-switch", "我要退款"))
+    result = run(runtime.run("user-1", "conv-switch", "查物流"))
+
+    assert result.status == "awaiting_user"
+    assert result.intent == "logistics_query"
+    assert "订单号或物流单号" in result.response
+    assert run(store.load("user-1", "conv-switch")).active_intent == "logistics_query"
+
+
+def test_pending_write_requires_clarification_before_switching_goal():
+    runtime, store, calls, _ = build_runtime()
+
+    run(runtime.run("user-1", "conv-pending-switch", "退款 ORD-1001"))
+    result = run(runtime.run("user-1", "conv-pending-switch", "查物流"))
+    state = run(store.load("user-1", "conv-pending-switch"))
+
+    assert result.status == "awaiting_user"
+    assert "等待确认" in result.response
+    assert state.active_intent == "refund_request"
+    assert state.pending_action is not None
+    assert all(name != "create_refund" for name, _ in calls)
+
+
+def test_same_agent_goals_resume_in_order_across_confirmations():
+    runtime, store, calls, _ = build_runtime()
+
+    class CompositeRecognizer:
+        async def recognize_structured(
+            self,
+            message,
+            history=None,
+            current_state=None,
+        ):
+            return UnderstandingResult(
+                intents=["complaint", "refund_request"],
+                primary_intent="complaint",
+                confidence=1.0,
+                extracted_slots={"order_id": "ORD-1001"},
+            )
+
+    runtime._recognizer = CompositeRecognizer()
+    first = run(runtime.run("user-1", "conv-queued", "投诉并退款"))
+    state = run(store.load("user-1", "conv-queued"))
+    assert first.status == "awaiting_user"
+    assert state.queued_goals == ["refund_request"]
+
+    runtime._recognizer = IntentRecognizer(api_key="test")
+    second = run(runtime.run("user-1", "conv-queued", "确认"))
+    state = run(store.load("user-1", "conv-queued"))
+    assert second.status == "awaiting_user"
+    assert state.active_intent == "refund_request"
+    assert state.queued_goals == []
+    assert "complaint" in state.completed_goals
+
+    third = run(runtime.run("user-1", "conv-queued", "确认"))
+    state = run(store.load("user-1", "conv-queued"))
+    assert third.status == "completed"
+    assert state.completed_goals == ["complaint", "refund_request"]
+    assert [name for name, _ in calls] == [
+        "create_ticket",
+        "query_order",
+        "check_refund_eligibility",
+        "create_refund",
+    ]
 
 
 def test_complaint_creates_handoff_ticket_after_confirmation():

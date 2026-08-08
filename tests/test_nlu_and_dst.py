@@ -25,6 +25,7 @@ from core.nlu_fast_track import (
     fast_track_extract,
 )
 from core.nlu_llm import (
+    _build_prompt,
     make_fallback_understanding,
     understand_with_llm,
     _parse_llm_json,
@@ -191,6 +192,23 @@ class TestBuildUnderstandingFromFastTrack:
         assert result is not None
         assert result.primary_intent == "order_query"
 
+    def test_broad_refund_keyword_does_not_short_circuit_llm(self):
+        ft = fast_track_extract("退款什么时候到账")
+        result = build_understanding_from_fast_track(
+            ft,
+            "退款什么时候到账",
+        )
+
+        assert result.primary_intent == "refund_request"
+        assert result.confidence < 0.9
+
+    def test_tracking_number_infers_logistics_query(self):
+        ft = FastTrackResult(tracking_no="SF1234567890")
+        result = build_understanding_from_fast_track(ft, "SF1234567890")
+
+        assert result.primary_intent == "logistics_query"
+        assert result.confidence == 0.9
+
 
 class TestStructuredRecognizerFastTrack:
     def test_legacy_llm_recognizer_remains_a_class_method(self):
@@ -229,6 +247,17 @@ class TestStructuredRecognizerFastTrack:
         assert result.primary_intent == "refund_request"
         assert result.corrected_slots == ["order_id"]
         assert result.user_act == UserAct.INFORM
+
+    @pytest.mark.asyncio
+    async def test_explicit_new_goal_becomes_switch_without_switch_words(self):
+        recognizer = IntentRecognizer.__new__(IntentRecognizer)
+        result = await recognizer.recognize_structured(
+            "查物流",
+            current_state={"active_intent": "refund_request"},
+        )
+
+        assert result.primary_intent == "logistics_query"
+        assert result.user_act == UserAct.SWITCH
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -315,6 +344,20 @@ class TestMakeFallbackUnderstanding:
 
 
 class TestUnderstandWithLlm:
+    def test_prompt_contains_bounded_recent_history(self):
+        prompt = _build_prompt(
+            "它到哪里了",
+            {"active_intent": "logistics_query"},
+            [
+                {"role": "user", "content": "查询 ORD-1001"},
+                {"role": "assistant", "content": "订单已经发货"},
+            ],
+        )
+
+        assert "最近对话" in prompt
+        assert "查询 ORD-1001" in prompt
+        assert "它到哪里了" in prompt
+
     @pytest.mark.asyncio
     async def test_valid_llm_response(self):
         async def mock_llm(prompt: str) -> str:
@@ -462,6 +505,25 @@ class TestDialogueStateTracker:
         assert new_state.active_intent == "refund_request"
         assert "order_id" in new_state.missing_slots
         assert "order_id" in new_state.required_slots
+
+    def test_logistics_accepts_order_or_tracking_number(self):
+        order_state = self.tracker.update(
+            DialogueState(),
+            self._understanding(
+                "logistics_query",
+                {"order_id": "ORD-1001"},
+            ),
+        )
+        tracking_state = self.tracker.update(
+            DialogueState(),
+            self._understanding(
+                "logistics_query",
+                {"tracking_no": "SF1234567890"},
+            ),
+        )
+
+        assert order_state.missing_slots == []
+        assert tracking_state.missing_slots == []
 
     def test_slot_inheritance_across_turns(self):
         """Turn 1: user says '我要退款' (no order_id).

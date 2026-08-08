@@ -120,6 +120,7 @@ class MemoryContext:
                 "missing_slots": [],
                 "confirmation_status": "not_required",
                 "completed_goals": [],
+                "queued_goals": [],
                 "state_version": 0,
             }
             meaningful = {}

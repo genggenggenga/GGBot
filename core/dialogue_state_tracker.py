@@ -19,6 +19,7 @@ from core.agent_models import (
     PendingAction,
     UnderstandingResult,
     UserAct,
+    get_missing_slots,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class DialogueStateTracker:
         # Deep copy to avoid mutating the input
         new_slots = dict(state.slots)
         new_completed = list(state.completed_goals)
+        new_queued = list(state.queued_goals)
         new_missing: List[str] = []
         new_required: List[str] = []
         new_confirmation = state.confirmation_status
@@ -77,6 +79,7 @@ class DialogueStateTracker:
             new_slots = cross_slots
             new_pending = None
             new_confirmation = ConfirmationStatus.NOT_REQUIRED
+            new_queued = []
         elif new_active is None:
             # The first understood intent starts the goal. Later turns keep the
             # active goal unless the NLU explicitly marks a switch.
@@ -111,7 +114,7 @@ class DialogueStateTracker:
         if new_active and new_active in INTENT_SCHEMAS:
             schema = INTENT_SCHEMAS[new_active]
             new_required = list(schema.required_slots)
-            new_missing = [s for s in new_required if s not in new_slots or not new_slots[s]]
+            new_missing = get_missing_slots(new_active, new_slots)
             if schema.allowed_agents:
                 new_last_agent = schema.allowed_agents[0]
 
@@ -124,6 +127,7 @@ class DialogueStateTracker:
             pending_action=new_pending,
             confirmation_status=new_confirmation,
             completed_goals=new_completed,
+            queued_goals=new_queued,
             last_agent=new_last_agent,
             state_version=state.state_version + 1,
         )
@@ -142,6 +146,7 @@ class DialogueStateTracker:
             pending_action=state.pending_action,
             confirmation_status=state.confirmation_status,
             completed_goals=completed,
+            queued_goals=list(state.queued_goals),
             last_agent=state.last_agent,
             state_version=state.state_version + 1,
         )
@@ -160,6 +165,7 @@ class DialogueStateTracker:
             pending_action=action,
             confirmation_status=ConfirmationStatus.PENDING,
             completed_goals=list(state.completed_goals),
+            queued_goals=list(state.queued_goals),
             last_agent=state.last_agent,
             state_version=state.state_version + 1,
         )

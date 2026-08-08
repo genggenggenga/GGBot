@@ -105,16 +105,34 @@ def query_order(order_id: str) -> Dict[str, Any]:
 
 
 @server.tool()
-def track_package(order_id: str) -> Dict[str, Any]:
-    """Query the deterministic package tracking timeline for an order."""
-    order = _order_or_error(order_id)
-    if not order["found"]:
-        return order
-    tracking = _LOGISTICS.get(order_id)
+def track_package(
+    order_id: str | None = None,
+    tracking_no: str | None = None,
+) -> Dict[str, Any]:
+    """Query a package timeline by order ID or tracking number."""
+    if order_id is None and tracking_no is None:
+        return {
+            "found": False,
+            "error": "order_id_or_tracking_no_required",
+        }
+    if order_id is not None:
+        order = _order_or_error(order_id)
+        if not order["found"]:
+            return order
+        tracking = _LOGISTICS.get(order_id)
+    else:
+        tracking = next(
+            (
+                item for item in _LOGISTICS.values()
+                if item.get("tracking_no") == tracking_no
+            ),
+            None,
+        )
     if tracking is None:
         return {
             "found": False,
             "order_id": order_id,
+            "tracking_no": tracking_no,
             "error": "tracking_not_available",
         }
     return {"found": True, **deepcopy(tracking)}

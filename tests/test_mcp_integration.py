@@ -55,6 +55,13 @@ async def protocol_scenario():
         assert tracking["found"] is True
         assert tracking["tracking_no"] == "SF1001002"
 
+        tracking_by_number = await client.call_tool(
+            "track_package",
+            {"tracking_no": "SF1001002"},
+        )
+        assert tracking_by_number["found"] is True
+        assert tracking_by_number["order_id"] == "ORD-1002"
+
         eligibility = await client.call_tool(
             "check_refund_eligibility",
             {"order_id": "ORD-1001", "reason": "quality_issue"},

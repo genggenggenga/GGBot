@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -24,7 +25,7 @@ from core.llm_utils import extract_text_content
 
 from core.nlu_fast_track import fast_track_extract, build_understanding_from_fast_track
 from core.nlu_llm import understand_with_llm, make_fallback_understanding
-from core.agent_models import INTENT_SCHEMAS, UnderstandingResult
+from core.agent_models import INTENT_SCHEMAS, UnderstandingResult, UserAct
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,11 @@ class IntentRecognizer:
                     "route_to": INTENT_SCHEMAS[active_intent].allowed_agents[0]
                     if active_intent in INTENT_SCHEMAS else None,
                 })
-            return result
+            return self._normalize_intent_transition(
+                result,
+                current_state,
+                explicit_new_goal=ft.explicit_intent,
+            )
 
         # 2. Single structured LLM call (re-uses the Anthropic client)
         async def _llm_fn(prompt: str) -> str:
@@ -226,10 +231,42 @@ class IntentRecognizer:
             return extract_text_content(resp.content)
 
         try:
-            return await understand_with_llm(message, _llm_fn, current_state)
+            result = await understand_with_llm(
+                message,
+                _llm_fn,
+                current_state,
+                history=history,
+            )
+            return self._normalize_intent_transition(result, current_state)
         except Exception as ex:
             logger.warning(f"recognize_structured LLM call failed: {ex}")
             return make_fallback_understanding(message, current_state)
+
+    @staticmethod
+    def _normalize_intent_transition(
+        result: UnderstandingResult,
+        current_state: Optional[Dict[str, Any]],
+        *,
+        explicit_new_goal: bool = True,
+    ) -> UnderstandingResult:
+        """Treat a clear new goal as a switch unless a write is awaiting confirmation."""
+        active_intent = (current_state or {}).get("active_intent")
+        if (
+            not active_intent
+            or not explicit_new_goal
+            or result.primary_intent in {active_intent, "other"}
+            or result.user_act in {
+                UserAct.CONFIRM,
+                UserAct.REJECT,
+                UserAct.SWITCH,
+            }
+            or (current_state or {}).get("confirmation_status") == "pending"
+        ):
+            return result
+        threshold = float(os.getenv("NLU_SWITCH_MIN_CONFIDENCE", "0.85"))
+        if result.confidence < threshold:
+            return result
+        return result.model_copy(update={"user_act": UserAct.SWITCH})
 
     async def _llm_recognize(
         self,

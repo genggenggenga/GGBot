@@ -7,7 +7,7 @@ than propagating errors.
 """
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from core.agent_models import INTENT_SCHEMAS, UnderstandingResult, UserAct
 from core.nlu_fast_track import fast_track_extract
@@ -50,7 +50,11 @@ _FEW_SHOT = """
 """
 
 
-def _build_prompt(text: str, current_state: Optional[Dict[str, Any]] = None) -> str:
+def _build_prompt(
+    text: str,
+    current_state: Optional[Dict[str, Any]] = None,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> str:
     """Build the full LLM prompt including system instructions and few-shot."""
     intent_names = ", ".join(sorted(INTENT_SCHEMAS.keys()))
     slot_info_parts = []
@@ -62,6 +66,21 @@ def _build_prompt(text: str, current_state: Optional[Dict[str, Any]] = None) -> 
     system = _SYSTEM_PROMPT.format(intents=intent_names, slot_info=slot_info)
 
     parts = [system, _FEW_SHOT]
+    if history:
+        recent = []
+        remaining = 1600
+        for item in reversed(history[-5:]):
+            role = str(item.get("role", "user"))
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            content = content[:remaining]
+            recent.append(f"{role}: {content}")
+            remaining -= len(content)
+            if remaining <= 0:
+                break
+        if recent:
+            parts.append("最近对话:\n" + "\n".join(reversed(recent)))
     if current_state:
         parts.append(f"当前状态: {json.dumps(current_state, ensure_ascii=False)}")
     parts.append(f'用户消息: "{text}"')
@@ -197,6 +216,7 @@ async def understand_with_llm(
     text: str,
     llm_call_fn: Any,
     current_state: Optional[Dict[str, Any]] = None,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> UnderstandingResult:
     """Call LLM once for structured intent + slot extraction.
 
@@ -210,7 +230,7 @@ async def understand_with_llm(
     Returns:
         UnderstandingResult on success, or a degraded fallback on failure.
     """
-    prompt = _build_prompt(text, current_state)
+    prompt = _build_prompt(text, current_state, history)
 
     try:
         raw = await llm_call_fn(prompt)

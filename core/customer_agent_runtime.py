@@ -1,4 +1,5 @@
 """State-driven customer-service runtime used by the /chat endpoint."""
+import os
 import time
 import uuid
 from collections import defaultdict
@@ -16,6 +17,8 @@ from core.agent_models import (
     Transition,
     TurnContext,
     UserAct,
+    get_intent_schema,
+    get_missing_slots,
 )
 from core.dialogue_state_tracker import DialogueStateTracker
 from core.trace_store import TraceStore, summarize_observations
@@ -59,6 +62,15 @@ class RuntimeAgentStats:
 class CustomerAgentRuntime:
     """Coordinate NLU, DST, TurnEngine and the domain-agent runtime."""
 
+    _ACTION_INTENTS = {
+        "refund_request",
+        "return_request",
+        "cancel_order",
+        "request",
+        "complaint",
+        "escalation",
+    }
+
     def __init__(
         self,
         recognizer: Any,
@@ -95,11 +107,19 @@ class CustomerAgentRuntime:
             history=history,
             current_state=previous.dialogue_state.model_dump(mode="json"),
         )
-        dialogue_state = self._tracker.update(
+        intent_clarification = self._intent_clarification(
             previous.dialogue_state,
             understanding,
         )
-        execution_state = self._entry_state(engine, dialogue_state)
+        if intent_clarification:
+            dialogue_state = previous.dialogue_state
+            execution_state = ExecutionState.UNDERSTANDING
+        else:
+            dialogue_state = self._tracker.update(
+                previous.dialogue_state,
+                understanding,
+            )
+            execution_state = self._entry_state(engine, dialogue_state)
         execution = TurnContext(
             user_id=user_id,
             conv_id=conv_id,
@@ -114,6 +134,11 @@ class CustomerAgentRuntime:
             and understanding.primary_intent != dialogue_state.active_intent
         ):
             execution_intents = [dialogue_state.active_intent]
+        if dialogue_state.queued_goals and not intent_clarification:
+            execution_intents = list(dict.fromkeys([
+                dialogue_state.active_intent,
+                *dialogue_state.queued_goals,
+            ]))
         turn_data: Dict[str, Any] = {
             "message": message,
             "agent_context": agent_context,
@@ -122,6 +147,7 @@ class CustomerAgentRuntime:
             "intents": execution_intents,
             "results": [],
             "citations": [],
+            "intent_clarification": intent_clarification,
         }
         self._register_handlers(engine, turn_data)
 
@@ -131,6 +157,8 @@ class CustomerAgentRuntime:
             "intent": understanding.primary_intent,
             "slot_keys": list(understanding.extracted_slots),
             "user_act": understanding.user_act.value,
+            "confidence": understanding.confidence,
+            "decision": "clarify" if intent_clarification else "accept",
             "state_version": dialogue_state.state_version,
         })
 
@@ -205,11 +233,20 @@ class CustomerAgentRuntime:
         turn_data: Dict[str, Any],
     ) -> None:
         async def understanding(context: TurnContext) -> Transition:
+            if turn_data["intent_clarification"]:
+                return Transition(
+                    next_state=ExecutionState.CLARIFYING,
+                    response=turn_data["intent_clarification"],
+                    reason="intent_clarification_required",
+                )
             if context.dialogue_state.missing_slots:
                 slot = context.dialogue_state.missing_slots[0]
                 return Transition(
                     next_state=ExecutionState.CLARIFYING,
-                    response=self._clarification(slot),
+                    response=self._clarification(
+                        slot,
+                        context.dialogue_state.active_intent,
+                    ),
                     reason=f"missing_slot:{slot}",
                 )
             return Transition(
@@ -233,6 +270,7 @@ class CustomerAgentRuntime:
                     response=response,
                     dialogue_updates={
                         "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
+                        "queued_goals": [],
                     },
                     reason="pending_action_rejected",
                 )
@@ -275,6 +313,15 @@ class CustomerAgentRuntime:
                 for citation in result.citations
             ]
             turn_data["citations"] = citations
+            completed_goals = list(context.dialogue_state.completed_goals)
+            for result in results:
+                if not result.completed:
+                    continue
+                for goal in result.goals or (
+                    [result.goal] if result.goal else []
+                ):
+                    if goal not in completed_goals:
+                        completed_goals.append(goal)
             failed = next(
                 (result for result in results if not result.success),
                 None,
@@ -284,42 +331,64 @@ class CustomerAgentRuntime:
                     next_state=ExecutionState.FAILED,
                     observations=observations,
                     response=response,
+                    dialogue_updates={
+                        "completed_goals": completed_goals,
+                    },
                     reason=failed.error or "agent_failed",
                 )
-            pending = next(
-                (
-                    result.pending_action
-                    for result in results
-                    if result.pending_action is not None
-                ),
+            missing = next(
+                (result for result in results if result.missing_slots),
                 None,
             )
-            if pending is not None:
+            if missing is not None:
+                remaining = turn_data["intents"][len(results):]
+                schema = get_intent_schema(missing.goal)
+                return Transition(
+                    next_state=ExecutionState.CLARIFYING,
+                    observations=observations,
+                    response=response,
+                    dialogue_updates={
+                        "active_intent": missing.goal,
+                        "required_slots": list(schema.required_slots),
+                        "missing_slots": list(missing.missing_slots),
+                        "pending_action": None,
+                        "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
+                        "completed_goals": completed_goals,
+                        "queued_goals": remaining,
+                    },
+                    reason="queued_goal_missing_slots",
+                )
+            pending_result = next(
+                (result for result in results if result.pending_action is not None),
+                None,
+            )
+            if pending_result is not None:
+                remaining = turn_data["intents"][len(results):]
+                schema = get_intent_schema(pending_result.goal)
                 return Transition(
                     next_state=ExecutionState.AWAITING_CONFIRMATION,
                     observations=observations,
                     response=response,
                     dialogue_updates={
-                        "pending_action": pending,
+                        "active_intent": pending_result.goal,
+                        "required_slots": list(schema.required_slots),
+                        "missing_slots": get_missing_slots(
+                            pending_result.goal,
+                            context.dialogue_state.slots,
+                        ),
+                        "pending_action": pending_result.pending_action,
                         "confirmation_status": ConfirmationStatus.PENDING,
+                        "completed_goals": completed_goals,
+                        "queued_goals": remaining,
                     },
                     reason="write_confirmation_required",
                 )
             updates: Dict[str, Any] = {
                 "pending_action": None,
                 "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
+                "queued_goals": [],
+                "completed_goals": completed_goals,
             }
-            goals = list(context.dialogue_state.completed_goals)
-            for result in results:
-                if not result.completed:
-                    continue
-                result_goals = result.goals or (
-                    [result.goal] if result.goal else []
-                )
-                for goal in result_goals:
-                    if goal not in goals:
-                        goals.append(goal)
-            updates["completed_goals"] = goals
             return Transition(
                 next_state=ExecutionState.RESPONDING,
                 observations=observations,
@@ -357,12 +426,44 @@ class CustomerAgentRuntime:
         return resumed
 
     @staticmethod
-    def _clarification(slot: str) -> str:
+    def _clarification(slot: str, intent: Optional[str] = None) -> str:
+        if intent == "logistics_query":
+            return "请提供订单号或物流单号。"
         prompts = {
             "order_id": "请提供需要处理的订单号。",
             "tracking_no": "请提供物流单号。",
         }
         return prompts.get(slot, f"请补充 {slot}。")
+
+    @classmethod
+    def _intent_clarification(cls, state, understanding) -> Optional[str]:
+        """Return a clarification prompt when an intent is unsafe to accept."""
+        if (
+            understanding.user_act in {UserAct.CONFIRM, UserAct.REJECT}
+            and state.confirmation_status == ConfirmationStatus.PENDING
+        ):
+            return None
+        if (
+            state.pending_action is not None
+            and understanding.primary_intent
+            not in {state.active_intent, "other"}
+            and understanding.user_act != UserAct.SWITCH
+        ):
+            return (
+                f"当前 {state.active_intent} 操作正在等待确认。"
+                f"是否取消并切换到 {understanding.primary_intent}？"
+            )
+        action_intent = understanding.primary_intent in cls._ACTION_INTENTS
+        threshold_name = (
+            "NLU_ACTION_MIN_CONFIDENCE"
+            if action_intent
+            else "NLU_MIN_CONFIDENCE"
+        )
+        default = "0.85" if action_intent else "0.65"
+        threshold = float(os.getenv(threshold_name, default))
+        if understanding.confidence >= threshold:
+            return None
+        return "我还不能确定你的需求，请说明要查询订单、物流，还是办理售后。"
 
     @staticmethod
     def _status(state: ExecutionState) -> str:

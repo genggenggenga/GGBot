@@ -39,12 +39,14 @@ _ALLOWED_TRANSITIONS = {
         ExecutionState.FAILED,
     },
     ExecutionState.RETRIEVING: {
+        ExecutionState.CLARIFYING,
         ExecutionState.RETRIEVING,
         ExecutionState.ACTING,
         ExecutionState.RESPONDING,
         ExecutionState.FAILED,
     },
     ExecutionState.ACTING: {
+        ExecutionState.CLARIFYING,
         ExecutionState.RETRIEVING,
         ExecutionState.ACTING,
         ExecutionState.AWAITING_CONFIRMATION,

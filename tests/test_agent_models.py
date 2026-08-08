@@ -8,6 +8,7 @@ from core.agent_models import (
     ExecutionState,
     Observation,
     PendingAction,
+    SlotMode,
     Transition,
     UnderstandingResult,
     UserAct,
@@ -163,7 +164,7 @@ def test_pending_action_ids_are_unique():
         ),
         (
             "logistics_query",
-            ("order_id",),
+            ("order_id", "tracking_no"),
             ("logistics",),
             "logistics_fact_returned",
         ),
@@ -192,6 +193,12 @@ def test_intent_schema_declares_runtime_contract(
     assert schema.required_slots == required_slots
     assert schema.allowed_agents == allowed_agents
     assert schema.completion_condition == completion_condition
+
+
+def test_logistics_intent_accepts_any_supported_identifier():
+    schema = get_intent_schema("logistics_query")
+
+    assert schema.slot_mode == SlotMode.ANY
 
 
 def test_intent_schema_covers_existing_intent_categories():
