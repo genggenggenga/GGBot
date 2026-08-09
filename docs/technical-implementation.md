@@ -38,7 +38,7 @@
 
 ### 系统架构
 
-![GGBot 系统架构](../diagrams/2026-08-07T100001/diagram.png)
+![GGBot 系统架构](../diagrams/v1/01-system-architecture.png)
 
 **主运行时。** `POST /chat` 已切换到 `CustomerAgentRuntime → DialogueStateTracker → TurnEngine → DomainAgentRuntime → ToolRegistry`。FAQ 使用固定 RAG 路径；订单、物流和退款使用有界 ServiceAgent；写操作在用户确认前不会执行。
 
@@ -131,7 +131,7 @@ while state not in terminal_states:
 
 **图解阅读方式。** 沿主箭头查看自然语言如何先经过规则或 LLM 形成强类型理解结果，再由 DST 按冲突规则合并为可持久化 DialogueState；图中的琥珀色节点对应下文重点解释的校验与状态治理规则。
 
-![NLU 与 Dialogue State Tracking](../diagrams/2026-08-07T100002/diagram.png)
+![NLU 与 Dialogue State Tracking](../diagrams/v1/02-nlu-dialogue-state.png)
 
 | 机制              | 实现方式                                                                    |
 | ----------------- | --------------------------------------------------------------------------- |
@@ -158,7 +158,7 @@ while state not in terminal_states:
 
 **图解阅读方式。** 先看 Router 如何把业务意图交给领域 Agent，再看 ServiceAgent 的有界 Observation/Action 循环；KnowledgeAgent 的固定检索路径和 AfterSalesAgent 的确认分支在图中被单独展开。
 
-![Multi-Agent 与有界执行](../diagrams/2026-08-07T100003/diagram.png)
+![Multi-Agent 与有界执行](../diagrams/v1/03-multi-agent-runtime.png)
 
 | Agent           | 职责                 | 核心工具                                                 |
 | --------------- | -------------------- | -------------------------------------------------------- |
@@ -183,7 +183,7 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **图解阅读方式。** 从 Agent 请求开始，依次核对 ToolRegistry 的工具白名单、读写分类、确认门禁，以及 Redis 对写 RPC 的幂等保护；红色支路表示调用在产生副作用前被拒绝。
 
-![工具安全边界](../diagrams/2026-08-07T100004/diagram.png)
+![工具安全边界](../diagrams/v1/04-tool-security.png)
 
 主应用不启动工具子进程。`register_internal_rpc_tools()` 显式注册领域 ToolSpec，LocalToolAdapter 把工具参数转换为 CommerceRPC、FulfillmentRPC 和 AfterSalesRPC 调用。Mock Client 与未来真实 HTTP/Thrift/gRPC Client 实现同一 Protocol。
 
@@ -211,7 +211,7 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **图解阅读方式。** 上方泳道展示文档如何保留结构并同步建立 Dense/BM25 索引，下方泳道展示在线查询如何双路召回、按排名融合、重排，并在阈值判断后生成引用或拒答。
 
-![Hybrid RAG](../diagrams/2026-08-07T100005/diagram.png)
+![Hybrid RAG](../diagrams/v1/05-hybrid-rag.png)
 
 `Loader → Version Timeline → QueryPlanner → Multi-Query Dense + BM25 → RRF → Cross-Encoder → Evidence Assembly → Grounded Generation → Citation Validation`
 
@@ -251,7 +251,7 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **图解阅读方式。** 以 MemoryContext 装配为中心，向外查看结构化状态、工作记忆、情景记忆和用户画像四条读写链路；不同颜色同时表示存储层级和写入门控。
 
-![记忆与持久化](../diagrams/2026-08-07T100006/diagram.png)
+![记忆与持久化](../diagrams/v1/06-memory-persistence.png)
 
 | 数据          | 存储       | 策略                                           |
 | ------------- | ---------- | ---------------------------------------------- |
