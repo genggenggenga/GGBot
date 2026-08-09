@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 
-from core.mcp_adapter import MCPClient, MCPToolAdapter
+from core.mcp_adapter import MCPClient, MCPClientManager, MCPToolAdapter
 from core.tool_registry import ToolRegistry, ToolType
 from mcp_server import customer_service_server
 
@@ -31,6 +31,69 @@ def server_client() -> MCPClient:
         args=["-m", "mcp_server.customer_service_server"],
         env=env,
     )
+
+
+def domain_client(module: str) -> MCPClient:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)
+    return MCPClient(
+        command=sys.executable,
+        args=["-m", module],
+        env=env,
+    )
+
+
+async def split_server_scenario():
+    manager = MCPClientManager({
+        "commerce": domain_client("mcp_server.commerce_server"),
+        "fulfillment": domain_client("mcp_server.fulfillment_server"),
+        "after_sales": domain_client("mcp_server.after_sales_server"),
+        "knowledge": domain_client("mcp_server.knowledge_server"),
+    })
+    await manager.connect()
+    try:
+        names = {tool.name for tool in await manager.list_tools()}
+        assert names == {
+            "commerce.query_order",
+            "commerce.query_order_items",
+            "commerce.query_payment_detail",
+            "commerce.query_invoice",
+            "fulfillment.track_package",
+            "fulfillment.estimate_delivery",
+            "fulfillment.diagnose_delivery_exception",
+            "after_sales.check_refund_eligibility",
+            "after_sales.evaluate_after_sales_options",
+            "after_sales.calculate_refund_quote",
+            "after_sales.create_refund",
+            "after_sales.create_return",
+            "after_sales.cancel_order",
+            "after_sales.create_ticket",
+            "knowledge.rag_search",
+        }
+
+        commerce = manager.clients["commerce"]
+        order = await commerce.call_tool(
+            "query_order",
+            {"order_id": "ORD-1001"},
+        )
+        assert order["found"] is True
+
+        adapters = await MCPToolAdapter.discover(
+            commerce,
+            namespace="commerce",
+        )
+        by_name = {adapter.spec.name: adapter for adapter in adapters}
+        result = await by_name["commerce.query_order"].call({
+            "order_id": "ORD-1001",
+        })
+        assert result.success is True
+        assert result.tool_name == "commerce.query_order"
+    finally:
+        await manager.close()
+
+
+def test_domain_mcp_servers_are_split_and_namespaced():
+    run(split_server_scenario())
 
 
 async def protocol_scenario():

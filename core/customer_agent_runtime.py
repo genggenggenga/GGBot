@@ -21,6 +21,8 @@ from core.agent_models import (
     get_missing_slots,
 )
 from core.dialogue_state_tracker import DialogueStateTracker
+from core.response_polisher import ResponsePolisher
+from core.tool_names import logical_tool_name
 from core.trace_store import TraceStore, summarize_observations
 from core.turn_engine import TurnEngine
 
@@ -79,6 +81,7 @@ class CustomerAgentRuntime:
         domain_runtime: DomainAgentRuntime,
         router: Router,
         trace_store: TraceStore,
+        response_polisher: Optional[ResponsePolisher] = None,
     ) -> None:
         self._recognizer = recognizer
         self._tracker = tracker
@@ -86,6 +89,7 @@ class CustomerAgentRuntime:
         self._domain_runtime = domain_runtime
         self._router = router
         self._trace_store = trace_store
+        self._response_polisher = response_polisher
         self._stats: Dict[str, RuntimeAgentStats] = defaultdict(
             RuntimeAgentStats,
         )
@@ -148,6 +152,7 @@ class CustomerAgentRuntime:
             "results": [],
             "citations": [],
             "intent_clarification": intent_clarification,
+            "polish_outcome": None,
         }
         self._register_handlers(engine, turn_data)
 
@@ -175,10 +180,21 @@ class CustomerAgentRuntime:
                 "result_summary": result_summary,
             })
 
+        polish_outcome = turn_data["polish_outcome"]
+        if polish_outcome is not None:
+            self._trace_store.append(trace_id, {
+                "event": "response_polish",
+                "applied": polish_outcome.applied,
+                "fallback": polish_outcome.fallback,
+                "response_kind": turn_data["response_kind"].value,
+                "validation_error": polish_outcome.validation_error,
+                "latency_ms": polish_outcome.latency_ms,
+            })
+
         # Trace: RAG-specific summary if rag_search was used
         rag_obs = [
             obs for obs in completed.observations
-            if obs.name == "rag_search" and obs.success
+            if logical_tool_name(obs.name) == "rag_search" and obs.success
         ]
         if rag_obs:
             self._trace_store.append(trace_id, {
@@ -208,7 +224,7 @@ class CustomerAgentRuntime:
             escalated=completed.execution_state == ExecutionState.FAILED,
             latency_ms=latency_ms,
             knowledge_used=any(
-                observation.name == "rag_search"
+                logical_tool_name(observation.name) == "rag_search"
                 for observation in completed.observations
             ),
             missing_slots=list(completed.dialogue_state.missing_slots),
@@ -389,6 +405,22 @@ class CustomerAgentRuntime:
                 "queued_goals": [],
                 "completed_goals": completed_goals,
             }
+            if self._response_polisher is not None:
+                response_kind = self._response_polisher.classify(
+                    results,
+                    citations,
+                )
+                turn_data["response_kind"] = response_kind
+                polish_outcome = await self._response_polisher.polish(
+                    self._response_polisher.build_request(
+                        response=response,
+                        response_kind=response_kind,
+                        observations=observations,
+                        citations=citations,
+                    ),
+                )
+                turn_data["polish_outcome"] = polish_outcome
+                response = polish_outcome.response
             return Transition(
                 next_state=ExecutionState.RESPONDING,
                 observations=observations,

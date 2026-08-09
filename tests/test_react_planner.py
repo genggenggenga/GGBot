@@ -90,7 +90,8 @@ async def test_react_planner_parses_structured_decision():
 
     assert decision.type == DecisionType.TOOL
     assert decision.tool_name == "query_order"
-    assert "不输出 Thought" in prompts[0]
+    assert "内部推理过程" in prompts[0].system
+    assert "query_order" in prompts[0].user
 
 
 @pytest.mark.asyncio

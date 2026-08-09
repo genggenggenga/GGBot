@@ -38,6 +38,10 @@ _EVENT_ALLOWED_KEYS = frozenset({
     "execution_state",
     "state_path",
     "status",
+    "applied",
+    "fallback",
+    "response_kind",
+    "validation_error",
 })
 _PREVIEW_ALLOWED_KEYS = frozenset({
     "answered",

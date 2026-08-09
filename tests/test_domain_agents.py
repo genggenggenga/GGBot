@@ -94,6 +94,34 @@ def test_order_agent_uses_tool_observation():
     assert "query_payment" not in agent.allowed_tools
 
 
+def test_order_agent_resolves_domain_namespaced_tool():
+    registry = ToolRegistry()
+
+    async def query_order(params, context):
+        return {
+            "found": True,
+            "order_id": params["order_id"],
+            "status": "paid",
+        }
+
+    register_tool(
+        registry,
+        "commerce.query_order",
+        query_order,
+    )
+    agent = OrderAgent(registry)
+    result = run(agent.execute(DialogueState(
+        active_intent="order_query",
+        slots={"order_id": "ORD-1"},
+        required_slots=["order_id"],
+    )))
+
+    assert result.success
+    assert result.observations[0].name == "commerce.query_order"
+    assert registry.is_tool_allowed("order", "commerce.query_order")
+    assert not registry.is_tool_allowed("order", "query_order")
+
+
 def test_logistics_agent_runs_bounded_plan_in_order():
     registry = ToolRegistry()
     calls = []

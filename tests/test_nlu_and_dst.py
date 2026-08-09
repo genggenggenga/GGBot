@@ -87,20 +87,31 @@ class TestDetectUserAct:
         assert detect_user_act("确认", confirmation_pending=True) == UserAct.CONFIRM
         assert detect_user_act("是的", confirmation_pending=True) == UserAct.CONFIRM
         assert detect_user_act("好的", confirmation_pending=True) == UserAct.CONFIRM
-        assert detect_user_act("yes", confirmation_pending=True) == UserAct.CONFIRM
 
     def test_reject(self):
         assert detect_user_act("取消", confirmation_pending=True) == UserAct.REJECT
         assert detect_user_act("不要", confirmation_pending=True) == UserAct.REJECT
-        assert detect_user_act("no", confirmation_pending=True) == UserAct.REJECT
         assert detect_user_act("不办了", confirmation_pending=True) == UserAct.REJECT
 
     @pytest.mark.parametrize("text", ["不可以", "不行", "不要确认", "不能提交"])
     def test_negative_confirmation_is_rejected(self, text):
         assert detect_user_act(text, confirmation_pending=True) == UserAct.REJECT
 
+    @pytest.mark.parametrize(
+        "text",
+        ["yes", "ok", "confirm", "no", "cancel", "reject"],
+    )
+    def test_english_user_acts_are_ignored(self, text):
+        assert detect_user_act(text, confirmation_pending=True) is None
+
     def test_explicit_goal_switch(self):
         assert detect_user_act("算了不退了，我想查物流") == UserAct.SWITCH
+
+    def test_business_intent_takes_priority_over_pending_rejection(self):
+        assert detect_user_act(
+            "取消订单",
+            confirmation_pending=True,
+        ) is None
 
     def test_confirmation_words_are_ignored_without_pending_action(self):
         assert detect_user_act("确认", confirmation_pending=False) is None
@@ -120,6 +131,8 @@ class TestDetectIntentFromKeywords:
     def test_delivery_policy_is_a_knowledge_query(self):
         assert detect_intent_from_keywords("配送一般几天") == "query"
         assert detect_intents_from_keywords("配送一般几天") == ["query"]
+        assert detect_intent_from_keywords("一般配送需要几天") == "query"
+        assert detect_intent_from_keywords("物流通常多久能到") == "query"
 
     def test_no_match(self):
         assert detect_intent_from_keywords("你好") is None
@@ -132,6 +145,49 @@ class TestDetectIntentFromKeywords:
     def test_handoff_intents_have_deterministic_routes(self):
         assert detect_intent_from_keywords("我要投诉") == "complaint"
         assert detect_intent_from_keywords("转人工客服") == "escalation"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "complain about service",
+            "refund status",
+            "return value",
+            "cancel subscription",
+            "track performance",
+            "order by time",
+        ],
+    )
+    def test_english_intent_keywords_are_ignored(self, text):
+        assert detect_intents_from_keywords(text) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "退款率报表",
+            "退货率分析",
+            "物流行业报告",
+            "订单数据统计",
+            "投诉率趋势",
+        ],
+    )
+    def test_analytics_terms_do_not_trigger_customer_service_intents(self, text):
+        assert detect_intents_from_keywords(text) == []
+
+    @pytest.mark.parametrize(
+        ("text", "intent"),
+        [
+            ("退款什么时候到账", "refund_request"),
+            ("我要申请退货", "return_request"),
+            ("我的订单状态是什么", "order_query"),
+            ("帮我查一下物流", "logistics_query"),
+        ],
+    )
+    def test_chinese_customer_service_phrases_remain_supported(
+        self,
+        text,
+        intent,
+    ):
+        assert detect_intent_from_keywords(text) == intent
 
 
 class TestFastTrackExtract:
@@ -231,6 +287,18 @@ class TestStructuredRecognizerFastTrack:
         recognizer.client = SimpleNamespace(messages=messages)
         recognizer._slot_validator = None
         return recognizer, messages
+
+    def test_slot_signals_only_support_chinese_labels(self):
+        assert IntentRecognizer._has_slot_signal("订单号是 ORD-1001", "order_id")
+        assert IntentRecognizer._has_slot_signal(
+            "物流单号是 SF1234567890",
+            "tracking_no",
+        )
+        assert not IntentRecognizer._has_slot_signal("order id ORD-1001", "order_id")
+        assert not IntentRecognizer._has_slot_signal(
+            "tracking number SF1234567890",
+            "tracking_no",
+        )
 
     def test_legacy_llm_recognizer_remains_a_class_method(self):
         assert callable(IntentRecognizer._llm_recognize)
@@ -461,7 +529,7 @@ class TestUnderstandWithLlm:
             ],
         )
 
-        assert "最近对话" in prompt
+        assert "recent_dialogue" in prompt
         assert "查询 ORD-1001" in prompt
         assert "它到哪里了" in prompt
 

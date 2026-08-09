@@ -27,6 +27,11 @@ from anthropic import AsyncAnthropic
 
 from core.intent_recognizer import IntentCategory, IntentRecognizer, UrgencyLevel
 from core.llm_utils import extract_text_content
+from core.prompts.legacy import (
+    BILLING_AGENT_SYSTEM_PROMPT,
+    GENERAL_AGENT_SYSTEM_PROMPT,
+    TECHNICAL_AGENT_SYSTEM_PROMPT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,26 +176,17 @@ class BaseAgent:
 
 class GeneralAgent(BaseAgent):
     agent_type    = AgentType.GENERAL
-    system_prompt = (
-        "你是 GGBot 智能客服。友好、简洁地回答用户问题。"
-        "如果问题超出你的能力范围，明确说明并建议转接专业客服。"
-    )
+    system_prompt = GENERAL_AGENT_SYSTEM_PROMPT
 
 
 class TechnicalAgent(BaseAgent):
     agent_type    = AgentType.TECHNICAL
-    system_prompt = (
-        "你是技术支持专家。专注于：故障排查、错误诊断、系统配置。"
-        "提供清晰的步骤化解决方案。遇到需要后台操作的问题，说明需要升级处理。"
-    )
+    system_prompt = TECHNICAL_AGENT_SYSTEM_PROMPT
 
 
 class BillingAgent(BaseAgent):
     agent_type    = AgentType.BILLING
-    system_prompt = (
-        "你是账单服务专家。专注于：账单查询、退款申请、发票问题、订阅管理。"
-        "对财务问题保持准确和专业。涉及实际退款操作时，说明需要人工审核。"
-    )
+    system_prompt = BILLING_AGENT_SYSTEM_PROMPT
 
 
 # ── 编排器 ────────────────────────────────────────────────────────────────────

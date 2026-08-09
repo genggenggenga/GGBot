@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
+from core.prompts.evaluation import build_judge_prompt
 
 from core.intent_recognizer import IntentCategory, IntentRecognizer
 
@@ -92,20 +93,6 @@ class LLMJudge:
     注意：LLM Judge 本身也有偏差，建议定期用人工标注校准。
     """
 
-    JUDGE_PROMPT = """你是一个客服质量评估专家。请对以下客服响应进行评分。
-
-用户问题: {question}
-Agent 响应: {response}
-{context_section}
-
-请从以下四个维度评分（0.0-1.0），返回 JSON：
-- relevance: 响应是否直接针对用户问题（0=完全无关，1=完全相关）
-- accuracy: 信息是否准确无误（0=明显错误，1=完全正确）
-- completeness: 是否完整解决了用户需求（0=完全没解决，1=完全解决）
-- helpfulness: 用户能否据此采取行动（0=毫无帮助，1=非常有帮助）
-
-只返回 JSON，例如: {{"relevance": 0.9, "accuracy": 0.8, "completeness": 0.7, "helpfulness": 0.85}}"""
-
     def __init__(self, client: AsyncAnthropic, model: str):
         self._client = client
         self._model  = model
@@ -116,17 +103,16 @@ Agent 响应: {response}
         response: str,
         context: Optional[str] = None,
     ) -> QualityScores:
-        ctx_section = f"背景信息: {context}" if context else ""
-        prompt = self.JUDGE_PROMPT.format(
-            question=question,
-            response=response,
-            context_section=ctx_section,
+        prompt = build_judge_prompt(
+            self._clean_text(question),
+            self._clean_text(response),
+            self._clean_text(context) if context else None,
         )
-        prompt = self._clean_text(prompt)
         try:
             resp = await self._client.messages.create(
                 model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1

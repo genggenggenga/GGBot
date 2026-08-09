@@ -11,43 +11,10 @@ from typing import Any, Dict, List, Optional
 
 from core.agent_models import INTENT_SCHEMAS, UnderstandingResult, UserAct
 from core.nlu_fast_track import fast_track_extract
+from core.prompts.nlu import build_prompt as build_nlu_prompt
+from core.prompts.types import PromptSpec
 
 logger = logging.getLogger(__name__)
-
-# ── LLM prompt template ───────────────────────────────────────────────────────
-
-_SYSTEM_PROMPT = """你是客服对话理解专家。根据用户消息和已有状态，提取意图和槽位。
-
-返回 JSON，格式：
-{{
-  "intent": "<意图名>",
-  "intents": ["<按优先级排列的全部意图>"],
-  "confidence": <0-1>,
-  "slots": {{"order_id": "...", ...}},
-  "user_act": "<inform|confirm|reject|switch|ask>",
-  "corrected_slots": ["<被用户纠正的槽位名>"]
-}}
-
-可用意图: {intents}
-各意图必填槽位: {slot_info}
-
-规则：
-1. 如果用户纠正了之前提供的值，把该槽位名放入 corrected_slots。
-2. 如果用户切换了目标意图，user_act 设为 switch。
-3. 如果一句话包含多个独立目标，全部写入 intents，intent 为首要目标。
-4. 仅输出 JSON，不要附加其他文字。"""
-
-_FEW_SHOT = """
-示例:
-用户: "我要退款，订单号 ORD-1001"
-→ {"intent":"refund_request","confidence":0.95,"slots":{"order_id":"ORD-1001"},"user_act":"inform","corrected_slots":[]}
-
-用户: "不对，订单号是 ORD-1002"
-→ {"intent":"refund_request","confidence":0.9,"slots":{"order_id":"ORD-1002"},"user_act":"inform","corrected_slots":["order_id"]}
-
-用户: "算了不退了，我想查物流"
-→ {"intent":"logistics_query","confidence":0.9,"slots":{},"user_act":"switch","corrected_slots":[]}
-"""
 
 
 def _build_prompt(
@@ -55,38 +22,28 @@ def _build_prompt(
     current_state: Optional[Dict[str, Any]] = None,
     history: Optional[List[Dict[str, str]]] = None,
 ) -> str:
-    """Build the full LLM prompt including system instructions and few-shot."""
-    intent_names = ", ".join(sorted(INTENT_SCHEMAS.keys()))
-    slot_info_parts = []
-    for name, schema in INTENT_SCHEMAS.items():
-        if schema.required_slots:
-            slot_info_parts.append(f"{name}: {', '.join(schema.required_slots)}")
-    slot_info = "; ".join(slot_info_parts) if slot_info_parts else "none"
+    """Build a combined prompt for diagnostics and backwards compatibility."""
+    return _build_prompt_spec(text, current_state, history).combined()
 
-    system = _SYSTEM_PROMPT.format(intents=intent_names, slot_info=slot_info)
 
-    parts = [system, _FEW_SHOT]
-    if history:
-        recent = []
-        remaining = 1600
-        for item in reversed(history[-5:]):
-            role = str(item.get("role", "user"))
-            content = str(item.get("content", "")).strip()
-            if not content:
-                continue
-            content = content[:remaining]
-            recent.append(f"{role}: {content}")
-            remaining -= len(content)
-            if remaining <= 0:
-                break
-        if recent:
-            parts.append("最近对话:\n" + "\n".join(reversed(recent)))
-    if current_state:
-        parts.append(f"当前状态: {json.dumps(current_state, ensure_ascii=False)}")
-    parts.append(f'用户消息: "{text}"')
-    parts.append("→")
-
-    return "\n".join(parts)
+def _build_prompt_spec(
+    text: str,
+    current_state: Optional[Dict[str, Any]] = None,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> PromptSpec:
+    """Build the provider-neutral system/user prompt pair."""
+    slot_requirements = {
+        name: list(schema.required_slots)
+        for name, schema in INTENT_SCHEMAS.items()
+        if schema.required_slots
+    }
+    return build_nlu_prompt(
+        text,
+        intent_names=sorted(INTENT_SCHEMAS),
+        slot_requirements=slot_requirements,
+        current_state=current_state,
+        history=history,
+    )
 
 
 def _parse_llm_json(raw: str) -> Optional[Dict[str, Any]]:
@@ -177,6 +134,11 @@ def make_fallback_understanding(
     slots = dict(ft.slots) if ft.hit else {}
     user_act = ft.user_act or UserAct.INFORM
     primary_intent = ft.intent if ft.intent and ft.intent in INTENT_SCHEMAS else "other"
+    if primary_intent == "other":
+        if ft.order_id:
+            primary_intent = "order_query"
+        elif ft.tracking_no:
+            primary_intent = "logistics_query"
     confidence = 0.3 if primary_intent == "other" else 0.6
 
     return UnderstandingResult(
@@ -222,15 +184,15 @@ async def understand_with_llm(
 
     Args:
         text: User message.
-        llm_call_fn: Async callable that takes a prompt string and returns
-                     raw LLM text output. This abstraction allows testing
-                     without a real LLM client.
+        llm_call_fn: Async callable that takes a PromptSpec and returns raw LLM
+                     text output. This abstraction allows testing without a
+                     real LLM client.
         current_state: Optional serialized DialogueState for context.
 
     Returns:
         UnderstandingResult on success, or a degraded fallback on failure.
     """
-    prompt = _build_prompt(text, current_state, history)
+    prompt = _build_prompt_spec(text, current_state, history)
 
     try:
         raw = await llm_call_fn(prompt)

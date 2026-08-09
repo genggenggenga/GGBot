@@ -5,10 +5,12 @@ import json
 from typing import Any, Awaitable, Callable, Dict, Sequence
 
 from core.agent_models import AgentDecision, DialogueState, Observation
+from core.prompts.react import build_prompt as build_react_prompt
+from core.prompts.types import PromptSpec
 from core.tool_registry import ToolSpec
 
 
-LLMCall = Callable[[str], Awaitable[str]]
+LLMCall = Callable[[PromptSpec], Awaitable[str]]
 
 
 class ReActPlanner:
@@ -50,7 +52,7 @@ class ReActPlanner:
         observations: Sequence[Observation],
         tools: Sequence[ToolSpec],
         system_prompt: str,
-    ) -> str:
+    ) -> PromptSpec:
         tool_contracts = [
             {
                 "name": tool.name,
@@ -80,32 +82,15 @@ class ReActPlanner:
             "confirmation_status": state.confirmation_status.value,
             "completed_goals": state.completed_goals,
         }
-        return f"""你是 {agent_name} 领域 Agent 的受约束决策器。
-{system_prompt}
-
-目标：{goal}
-用户消息：{message}
-业务状态：{json.dumps(state_data, ensure_ascii=False, default=str)}
-已获得的 Observation：{observation_text}
-允许使用的工具：{json.dumps(tool_contracts, ensure_ascii=False)}
-
-每次只决定一个下一步，严格遵守：
-1. 只能选择允许列表中的工具，不得虚构工具或参数。
-2. 工具参数只能来自用户消息、业务状态或 Observation。
-3. 已有足够事实时返回 finish；缺少必要信息时返回 clarify。
-4. 不要重复调用相同工具和相同参数。
-5. 写工具只能提出调用建议，执行层会负责用户确认。
-6. 最终回答只能基于业务状态和 Observation，不得编造事实。
-7. 只输出 JSON，不输出 Thought 或其他文字。
-
-输出格式：
-{{
-  "type": "tool|finish|clarify|handoff",
-  "tool_name": "工具名或 null",
-  "arguments": {{}},
-  "response": "finish/clarify/handoff 时必填",
-  "reason_code": "简短稳定的原因编码"
-}}"""
+        return build_react_prompt(
+            agent_name=agent_name,
+            domain_policy=system_prompt,
+            goal=goal,
+            message=message,
+            state=state_data,
+            observations=observation_text,
+            tools=tool_contracts,
+        )
 
     @staticmethod
     def _parse_json(raw: str) -> Dict[str, Any]:

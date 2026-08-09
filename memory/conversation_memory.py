@@ -23,13 +23,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING
 
 import chromadb
 import redis
 from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
+from core.prompts.memory import build_profile_prompt, build_summary_prompt
 
 if TYPE_CHECKING:
     from core.agent_models import DialogueState
@@ -194,6 +195,7 @@ class MemoryManager:
     WORKING_MAX   = 20    # 工作记忆最大条数，超过则触发压缩
     COMPRESS_AT   = 15    # 达到此条数时压缩，保留摘要 + 最近 5 条
     HISTORY_TOP_K = 5     # 情景记忆检索返回条数
+    PROFILE_TOP_K = 3     # 当前问题相关的用户画像分片数
     KEEP_RECENT   = 5     # 压缩时保留最近消息条数
 
     def __init__(
@@ -310,24 +312,16 @@ class MemoryManager:
         if not self._has_stable_preference_signal(recent_text):
             return
 
-        text = self._safe_text("\n".join(f"{m.role.value}: {m.content}" for m in messages[-10:]))
-        prompt = f"""从以下客服对话中，**只提炼用户明确表达的长期稳定偏好**，返回JSON。
-注意：
-- 订单号、物流号、订单状态、当前问题等临时业务信息**绝对不能**包含在内
-- 只保留跨会话仍然有效的偏好，如：语言偏好（中文/英文）、沟通方式（电话/短信/邮件）、
-  称呼、特殊需求（无障碍需求）、明确的喜好/厌恶
-- 如果没有明确的稳定偏好，返回空的 preferences 数组
-
-对话:
-{text}
-
-返回格式: {{"preferences": ["..."], "language": "zh/en/...", "communication_preference": "..."}}"""
-        prompt = self._safe_text(prompt)
+        prompt = build_profile_prompt([
+            {"role": m.role.value, "content": self._safe_text(m.content)}
+            for m in messages[-10:]
+        ])
 
         try:
             resp = await self._client.messages.create(
                 model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
@@ -344,19 +338,44 @@ class MemoryManager:
             existing = await self._get_profile(user_id)
             merged = self._merge_profile(existing, filtered)
 
-            doc_id = f"{user_id}_profile"
-            doc_text = self._safe_text(json.dumps(merged, ensure_ascii=False))
+            snapshot_id = f"{user_id}_profile"
+            ids = [snapshot_id]
+            documents = [
+                self._safe_text(json.dumps(merged, ensure_ascii=False)),
+            ]
+            metadatas = [{
+                "user_id": user_id,
+                "profile_kind": "snapshot",
+                "ts": datetime.now().isoformat(),
+            }]
+            for index, (document, payload) in enumerate(
+                self._profile_fragments(merged),
+            ):
+                digest = hashlib.sha256(document.encode("utf-8")).hexdigest()[:12]
+                ids.append(f"{snapshot_id}_{index}_{digest}")
+                documents.append(document)
+                metadatas.append({
+                    "user_id": user_id,
+                    "profile_kind": "fragment",
+                    "profile_payload": json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                    ),
+                    "ts": datetime.now().isoformat(),
+                })
 
-            try:
-                await _backend_call(self._profile.delete, ids=[doc_id])
-            except Exception:
-                pass
-
+            existing = await _backend_call(
+                self._profile.get,
+                where={"user_id": user_id},
+            )
+            existing_ids = existing.get("ids", [])
+            if existing_ids:
+                await _backend_call(self._profile.delete, ids=existing_ids)
             await _backend_call(
                 self._profile.add,
-                ids=[doc_id],
-                documents=[doc_text],
-                metadatas=[{"user_id": user_id, "ts": datetime.now().isoformat()}],
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
             )
             logger.info(f"用户稳定偏好已更新: {user_id}")
         except Exception as ex:
@@ -403,6 +422,7 @@ class MemoryManager:
                     "突出用户需求、处理结果、是否完成或转人工。"
                 ),
                 fallback=f"客服会话（{event_type.value}），共{len(messages)}条消息。",
+                summary_kind="episodic",
             )
 
         event_label = "任务完成" if event_type == EpisodicEventType.TASK_COMPLETED else "转人工"
@@ -451,7 +471,7 @@ class MemoryManager:
         )
 
         # 3. 用户画像
-        profile = await self._get_profile(user_id)
+        profile = await self._get_profile(user_id, query=query)
 
         # 4. 会话摘要（覆盖式，有界）
         summary = (
@@ -544,14 +564,22 @@ class MemoryManager:
         max_chars: int,
         instruction: str,
         fallback: str,
+        summary_kind: Literal[
+            "working_memory",
+            "episodic",
+        ] = "working_memory",
     ) -> str:
         """调用 LLM 生成摘要，失败时返回 fallback。结果按 max_chars 截断。"""
-        safe_text = self._safe_text(text)
-        prompt = self._safe_text(f"{instruction}\n\n对话：\n{safe_text}")
+        prompt = build_summary_prompt(
+            self._safe_text(text),
+            self._safe_text(instruction),
+            summary_kind=summary_kind,
+        )
         try:
             resp = await self._client.messages.create(
                 model=self._model, max_tokens=300, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             summary = self._safe_text(extract_text_content(resp.content)).strip()
             if not summary:
@@ -690,19 +718,92 @@ class MemoryManager:
         except Exception as ex:
             logger.warning(f"存储情景记忆失败: {ex}")
 
-    async def _get_profile(self, user_id: str) -> Dict[str, Any]:
-        """获取用户画像（最新合并结果）。"""
+    async def _get_profile(
+        self,
+        user_id: str,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        """Get the full snapshot or vector-relevant profile fragments."""
         try:
+            if query.strip():
+                results = await _backend_call(
+                    self._profile.query,
+                    query_texts=[self._safe_text(query)],
+                    n_results=self.PROFILE_TOP_K,
+                    where={
+                        "$and": [
+                            {"user_id": {"$eq": user_id}},
+                            {"profile_kind": {"$eq": "fragment"}},
+                        ],
+                    },
+                )
+                metadatas = (
+                    results.get("metadatas", [[]])[0]
+                    if results.get("metadatas")
+                    else []
+                )
+                relevant: Dict[str, Any] = {}
+                for metadata in metadatas:
+                    payload = (metadata or {}).get("profile_payload")
+                    if not payload:
+                        continue
+                    relevant = self._merge_profile(
+                        relevant,
+                        json.loads(payload),
+                    )
+                if relevant:
+                    return relevant
+
             results = await _backend_call(
                 self._profile.get,
-                where={"user_id": user_id},
+                where={
+                    "$and": [
+                        {"user_id": {"$eq": user_id}},
+                        {"profile_kind": {"$eq": "snapshot"}},
+                    ],
+                },
                 limit=1,
             )
             if results["documents"]:
                 return json.loads(results["documents"][0])
+            # Backward compatibility for profiles stored before fragmentation.
+            legacy = await _backend_call(
+                self._profile.get,
+                where={"user_id": user_id},
+                limit=1,
+            )
+            if legacy["documents"]:
+                return json.loads(legacy["documents"][0])
         except Exception:
             pass
         return {}
+
+    @staticmethod
+    def _profile_fragments(
+        profile: Dict[str, Any],
+    ) -> List[tuple[str, Dict[str, Any]]]:
+        """Build semantically meaningful documents from profile fields."""
+        labels = {
+            "preferences": "用户偏好",
+            "language": "语言偏好",
+            "communication_preference": "沟通偏好",
+            "contact_preference": "联系方式偏好",
+            "timezone": "时区偏好",
+            "accessibility": "无障碍需求",
+        }
+        fragments: List[tuple[str, Dict[str, Any]]] = []
+        for field_name, value in profile.items():
+            label = labels.get(field_name, field_name)
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                if item is None or item == "":
+                    continue
+                payload_value = [item] if isinstance(value, list) else item
+                fragments.append((
+                    f"{label}：{item}",
+                    {field_name: payload_value},
+                ))
+        return fragments
 
     @staticmethod
     def _wm_key(user_id: str, conv_id: str) -> str:

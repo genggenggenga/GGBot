@@ -80,6 +80,7 @@ class _FakeCollection:
         self._ids: List[str] = []
         self._docs: List[str] = []
         self._metas: List[Dict[str, Any]] = []
+        self.query_calls: List[Dict[str, Any]] = []
 
     def add(self, ids: List[str], documents: List[str], metadatas: List[Dict[str, Any]] = None):
         for i, doc_id in enumerate(ids):
@@ -106,47 +107,65 @@ class _FakeCollection:
                 self._docs.pop(idx)
                 self._metas.pop(idx)
 
-    def get(self, where: Dict[str, Any] = None, limit: int = 1):
+    @classmethod
+    def _matches(cls, metadata: Dict[str, Any], where: Dict[str, Any]) -> bool:
+        if not where:
+            return True
+        if "$and" in where:
+            return all(cls._matches(metadata, item) for item in where["$and"])
+        for key, expected in where.items():
+            if isinstance(expected, dict) and "$eq" in expected:
+                expected = expected["$eq"]
+            if metadata.get(key) != expected:
+                return False
+        return True
+
+    def get(
+        self,
+        where: Dict[str, Any] = None,
+        limit: Optional[int] = None,
+    ):
         if not self._docs:
             return {"ids": [], "documents": [], "metadatas": []}
-        # Simple where filter: match exact user_id
-        if where and "user_id" in where:
-            uid = where["user_id"]
-            filtered = [
-                (i, doc, meta)
-                for i, (doc, meta) in enumerate(zip(self._docs, self._metas))
-                if meta.get("user_id") == uid
-            ]
-            if not filtered:
-                return {"ids": [], "documents": [], "metadatas": []}
-            # Return latest
-            i, doc, meta = filtered[-1]
-            return {
-                "ids": [self._ids[i]],
-                "documents": [doc],
-                "metadatas": [meta],
-            }
-        # Return latest
+        filtered = [
+            (doc_id, doc, meta)
+            for doc_id, doc, meta in zip(
+                self._ids,
+                self._docs,
+                self._metas,
+            )
+            if self._matches(meta, where or {})
+        ]
+        if limit is not None:
+            filtered = filtered[:limit]
         return {
-            "ids": [self._ids[-1]],
-            "documents": [self._docs[-1]],
-            "metadatas": [self._metas[-1]],
+            "ids": [item[0] for item in filtered],
+            "documents": [item[1] for item in filtered],
+            "metadatas": [item[2] for item in filtered],
         }
 
     def query(self, query_texts: List[str], n_results: int = 5, where: Dict[str, Any] = None):
+        self.query_calls.append({
+            "query_texts": list(query_texts),
+            "n_results": n_results,
+            "where": where,
+        })
         if not self._docs:
             return {"ids": [[]], "documents": [[]], "metadatas": [[]]}
-        # Simple dummy: return all docs matching where (no real vector search)
-        results = []
-        if where and "user_id" in where:
-            uid = where["user_id"]
-            for i, (doc, meta) in enumerate(zip(self._docs, self._metas)):
-                if meta.get("user_id") == uid:
-                    results.append(doc)
-        else:
-            results = list(self._docs)
-        results = results[:n_results]
-        return {"ids": [results], "documents": [results], "metadatas": [[] for _ in results]}
+        results = [
+            (doc_id, doc, meta)
+            for doc_id, doc, meta in zip(
+                self._ids,
+                self._docs,
+                self._metas,
+            )
+            if self._matches(meta, where or {})
+        ][:n_results]
+        return {
+            "ids": [[item[0] for item in results]],
+            "documents": [[item[1] for item in results]],
+            "metadatas": [[item[2] for item in results]],
+        }
 
 
 class FakeChroma:
@@ -176,14 +195,25 @@ class FakeLLMClient:
         self.calls: List[Dict[str, Any]] = []
         self.messages = self  # mimic .messages attribute
 
-    async def create(self, model: str, max_tokens: int, temperature: float, messages: List[Dict]):
-        self.calls.append({"model": model, "messages": messages})
+    async def create(
+        self,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        messages: List[Dict],
+        system: str = "",
+    ):
+        self.calls.append({
+            "model": model,
+            "system": system,
+            "messages": messages,
+        })
         # Determine response type by prompt content
         prompt_text = ""
         for m in messages:
             if isinstance(m.get("content"), str):
                 prompt_text += m["content"]
-        if "稳定偏好" in prompt_text or "preferences" in prompt_text:
+        if "长期偏好" in system or "preferences" in prompt_text:
             content_text = self.profile_response
         else:
             content_text = self.summary_response
@@ -334,6 +364,7 @@ class TestOverwriteSummarization:
         new_summary = mgr._redis.get(skey)
         assert new_summary == "全新摘要内容"
         assert "旧的摘要内容" not in new_summary
+        assert "工作记忆压缩器" in mgr._client.calls[-1]["system"]
 
     @pytest.mark.asyncio
     async def test_summary_is_bounded_by_max_chars(self):
@@ -418,6 +449,7 @@ class TestEventTriggeredEpisodicMemory:
         assert "任务完成" in doc
         meta = episodic._metas[0]
         assert meta["event_type"] == "task_completed"
+        assert "情景记忆记录器" in mgr._client.calls[-1]["system"]
         assert meta["user_id"] == "u1"
         assert meta["conv_id"] == "c1"
 
@@ -534,6 +566,61 @@ class TestStablePreferenceGating:
         profile = await mgr._get_profile("u1")
         assert "preferences" in profile
         assert "language" in profile
+
+    @pytest.mark.asyncio
+    async def test_context_vector_searches_relevant_profile_fragments(self):
+        profile_resp = json.dumps({
+            "preferences": ["用中文回复", "回答尽量简洁"],
+            "language": "zh",
+            "communication_preference": "短信",
+        })
+        mgr = _make_manager(profile_response=profile_resp)
+        await mgr.add_message(
+            "u1",
+            "c1",
+            MsgRole.USER,
+            "以后都请用中文回复，回答尽量简洁",
+        )
+        await mgr.update_profile("u1", "c1")
+
+        context = await mgr.get_context(
+            "u1",
+            "c1",
+            query="请使用什么语言回答？",
+        )
+
+        assert context.user_profile
+        assert mgr._profile.query_calls[-1]["query_texts"] == [
+            "请使用什么语言回答？",
+        ]
+        assert mgr._profile.query_calls[-1]["n_results"] == mgr.PROFILE_TOP_K
+        assert mgr._profile.query_calls[-1]["where"] == {
+            "$and": [
+                {"user_id": {"$eq": "u1"}},
+                {"profile_kind": {"$eq": "fragment"}},
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_profile_vector_search_is_isolated_by_user(self):
+        mgr = _make_manager(profile_response=json.dumps({
+            "preferences": ["用中文回复"],
+            "language": "zh",
+        }))
+        await mgr.add_message("u1", "c1", MsgRole.USER, "我希望用中文回复")
+        await mgr.update_profile("u1", "c1")
+
+        mgr._client.profile_response = json.dumps({
+            "preferences": ["使用短信联系"],
+            "communication_preference": "短信",
+        })
+        await mgr.add_message("u2", "c2", MsgRole.USER, "我希望使用短信联系")
+        await mgr.update_profile("u2", "c2")
+
+        profile = await mgr._get_profile("u1", query="如何联系")
+
+        assert "使用短信联系" not in profile.get("preferences", [])
+        assert profile.get("communication_preference") != "短信"
 
     @pytest.mark.asyncio
     async def test_transient_entities_filtered_from_profile(self):

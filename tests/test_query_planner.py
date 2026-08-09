@@ -6,7 +6,8 @@ from rag.query_planner import QueryPlanner
 @pytest.mark.asyncio
 async def test_query_planner_resolves_reference_and_builds_multi_query():
     async def llm_call(prompt):
-        assert "它多久到账" in prompt
+        assert "它多久到账" in prompt.user
+        assert "不得创造" in prompt.system
         return """{
           "standalone_query": "退款审核通过后多久退回原支付账户",
           "alternative_queries": ["退款到账时间", "退款原路退回周期"],

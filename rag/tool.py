@@ -22,48 +22,11 @@ def register_rag_tool(
 ) -> None:
     async def search_handler(params, context):
         del context
-        mode = params.get("mode", "rerank")
-        queries = params.get("queries") or [params["query"]]
-        current_filter = RetrievalFilter.current(as_of=params.get("as_of"))
-        result = await asyncio.to_thread(
-            _search,
+        return await asyncio.to_thread(
+            execute_rag_search,
             retriever,
-            queries,
-            params["query"],
-            params.get("top_k", 5),
-            params.get("candidate_k", 20),
-            mode,
-            current_filter,
+            params,
         )
-        temporal_mode = _resolve_temporal_mode(
-            params.get("temporal_mode", "auto"),
-            params["query"],
-        )
-        if temporal_mode != "compare_previous" or not result.answered:
-            payload = result.model_dump(mode="json")
-            payload["temporal_mode"] = temporal_mode
-            return payload
-
-        current_hit = result.hits[0]
-        knowledge_id = current_hit.chunk.metadata.get("knowledge_id")
-        effective_at = current_hit.chunk.metadata.get("effective_at")
-        previous = None
-        if knowledge_id and isinstance(effective_at, (int, float)):
-            previous_filter = RetrievalFilter.current(
-                as_of=float(effective_at) - 0.000001,
-                knowledge_ids=[str(knowledge_id)],
-            )
-            previous = await asyncio.to_thread(
-                _search,
-                retriever,
-                queries,
-                params["query"],
-                params.get("top_k", 5),
-                params.get("candidate_k", 20),
-                mode,
-                previous_filter,
-            )
-        return _temporal_payload(result, previous, str(knowledge_id or ""))
 
     spec = ToolSpec(
         name="rag_search",
@@ -105,6 +68,53 @@ def register_rag_tool(
         "after_sales",
     ):
         registry.add_to_agent_whitelist(agent_name, spec.name)
+
+
+def execute_rag_search(
+    retriever: HybridRetriever,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Execute the shared RAG contract for local and MCP adapters."""
+    mode = params.get("mode", "rerank")
+    queries = params.get("queries") or [params["query"]]
+    current_filter = RetrievalFilter.current(as_of=params.get("as_of"))
+    result = _search(
+        retriever,
+        queries,
+        params["query"],
+        params.get("top_k", 5),
+        params.get("candidate_k", 20),
+        mode,
+        current_filter,
+    )
+    temporal_mode = _resolve_temporal_mode(
+        params.get("temporal_mode", "auto"),
+        params["query"],
+    )
+    if temporal_mode != "compare_previous" or not result.answered:
+        payload = result.model_dump(mode="json")
+        payload["temporal_mode"] = temporal_mode
+        return payload
+
+    current_hit = result.hits[0]
+    knowledge_id = current_hit.chunk.metadata.get("knowledge_id")
+    effective_at = current_hit.chunk.metadata.get("effective_at")
+    previous = None
+    if knowledge_id and isinstance(effective_at, (int, float)):
+        previous_filter = RetrievalFilter.current(
+            as_of=float(effective_at) - 0.000001,
+            knowledge_ids=[str(knowledge_id)],
+        )
+        previous = _search(
+            retriever,
+            queries,
+            params["query"],
+            params.get("top_k", 5),
+            params.get("candidate_k", 20),
+            mode,
+            previous_filter,
+        )
+    return _temporal_payload(result, previous, str(knowledge_id or ""))
 
 
 def _search(

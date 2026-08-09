@@ -6,11 +6,13 @@ import logging
 import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from core.prompts.rag import build_query_planner_prompt
+from core.prompts.types import PromptSpec
 from rag.models import QueryPlan
 
 
 logger = logging.getLogger(__name__)
-LLMCall = Callable[[str], Awaitable[str]]
+LLMCall = Callable[[PromptSpec], Awaitable[str]]
 _REFERENCE_PATTERN = re.compile(
     r"(它|这个|那个|上面(?:的)?|刚才(?:的)?|该(?:政策|问题|流程|功能))",
 )
@@ -130,48 +132,13 @@ class QueryPlanner:
         message: str,
         history: Optional[List[Dict[str, str]]],
         dialogue_state: Optional[Dict[str, Any]],
-    ) -> str:
-        recent = [
-            {
-                "role": str(item.get("role", "user"))[:20],
-                "content": str(item.get("content", ""))[:800],
-            }
-            for item in (history or [])[-5:]
-        ]
-        state = {
-            key: value
-            for key, value in (dialogue_state or {}).items()
-            if key in {
-                "active_intent",
-                "slots",
-                "last_agent",
-                "completed_goals",
-            }
-        }
-        return f"""你是知识库检索 Query Planner。只改写问题，不回答问题。
-
-任务：
-1. 根据最近对话和业务状态消解“它、这个、上面的、该政策”等指代。
-2. 把当前问题改写为脱离对话也能理解的 standalone_query。
-3. 生成最多 {max(0, self.max_queries - 1)} 条不同表达的检索查询。
-
-约束：
-- 不得创造上下文中不存在的事实、ID、数字、地区或产品。
-- 必须原样保留当前问题中的订单号、错误码、金额和数字。
-- 查询应简短，适合向量与 BM25 检索。
-- 仅输出 JSON。
-
-最近对话：{json.dumps(recent, ensure_ascii=False)}
-业务状态：{json.dumps(state, ensure_ascii=False)}
-当前问题：{json.dumps(message, ensure_ascii=False)}
-
-输出格式：
-{{
-  "standalone_query": "...",
-  "alternative_queries": ["...", "..."],
-  "resolved_references": {{"这个": "..."}},
-  "confidence": 0.0
-}}"""
+    ) -> PromptSpec:
+        return build_query_planner_prompt(
+            message,
+            history=history,
+            dialogue_state=dialogue_state,
+            max_alternatives=self.max_queries - 1,
+        )
 
     @staticmethod
     def _parse_json(raw: str) -> Dict[str, Any]:

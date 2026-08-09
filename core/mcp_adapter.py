@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from mcp.client.session import ClientSession
@@ -94,11 +95,75 @@ class MCPClient:
             return text
 
 
+@dataclass(frozen=True)
+class NamespacedMCPTool:
+    """MCP tool metadata with the registry namespace applied."""
+
+    name: str
+    title: Optional[str]
+    description: str
+    inputSchema: Dict[str, Any]
+    outputSchema: Optional[Dict[str, Any]]
+    annotations: Any = None
+
+
+class MCPClientManager:
+    """Own all domain MCP clients and expose a combined tool catalogue."""
+
+    def __init__(self, clients: Dict[str, MCPClient]) -> None:
+        self._clients = dict(clients)
+
+    @property
+    def clients(self) -> Dict[str, MCPClient]:
+        return dict(self._clients)
+
+    async def connect(self) -> None:
+        connected: List[MCPClient] = []
+        try:
+            for client in self._clients.values():
+                await client.connect()
+                connected.append(client)
+        except Exception:
+            for client in reversed(connected):
+                await client.close()
+            raise
+
+    async def close(self) -> None:
+        for client in reversed(list(self._clients.values())):
+            try:
+                await client.close()
+            except Exception:
+                # Continue closing the remaining subprocess sessions.
+                pass
+
+    async def list_tools(self) -> List[NamespacedMCPTool]:
+        tools: List[NamespacedMCPTool] = []
+        for namespace, client in self._clients.items():
+            for tool in await client.list_tools():
+                tools.append(NamespacedMCPTool(
+                    name=f"{namespace}.{tool.name}",
+                    title=getattr(tool, "title", None),
+                    description=getattr(tool, "description", None) or "",
+                    inputSchema=getattr(tool, "inputSchema", None)
+                    or {"type": "object"},
+                    outputSchema=getattr(tool, "outputSchema", None),
+                    annotations=getattr(tool, "annotations", None),
+                ))
+        return tools
+
+
 class MCPToolAdapter:
     """Adapts one discovered MCP tool to the ToolRegistry protocol."""
 
-    def __init__(self, client: MCPClient, spec: ToolSpec) -> None:
+    def __init__(
+        self,
+        client: MCPClient,
+        spec: ToolSpec,
+        *,
+        remote_name: Optional[str] = None,
+    ) -> None:
         self._client = client
+        self._remote_name = remote_name or spec.name
         self.spec = spec
         self.stats = ToolStats()
         self.breaker = CircuitBreaker()
@@ -124,7 +189,7 @@ class MCPToolAdapter:
         try:
             validate_params(self.spec, params)
             data = await asyncio.wait_for(
-                self._client.call_tool(self.spec.name, params),
+                self._client.call_tool(self._remote_name, params),
                 timeout=self.spec.timeout_s,
             )
             latency_ms = (time.monotonic() - started) * 1000
@@ -164,14 +229,20 @@ class MCPToolAdapter:
         cls,
         client: MCPClient,
         *,
+        namespace: Optional[str] = None,
         write_tools: Optional[set[str]] = None,
         timeout_s: float = 30.0,
     ) -> List["MCPToolAdapter"]:
         write_tools = write_tools or set()
         adapters: List[MCPToolAdapter] = []
         for tool in await client.list_tools():
+            registered_name = (
+                f"{namespace}.{tool.name}"
+                if namespace
+                else tool.name
+            )
             spec = ToolSpec(
-                name=tool.name,
+                name=registered_name,
                 description=tool.description or tool.name,
                 input_schema=tool.inputSchema or {"type": "object"},
                 tool_type=(
@@ -179,7 +250,7 @@ class MCPToolAdapter:
                 ),
                 timeout_s=timeout_s,
             )
-            adapters.append(cls(client, spec))
+            adapters.append(cls(client, spec, remote_name=tool.name))
         return adapters
 
 

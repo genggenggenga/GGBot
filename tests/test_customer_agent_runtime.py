@@ -15,6 +15,7 @@ from core.customer_agent_runtime import CustomerTurnResult
 from core.dialogue_state_tracker import DialogueStateTracker
 from core.agent_models import UnderstandingResult
 from core.intent_recognizer import IntentRecognizer
+from core.response_polisher import ResponsePolisher
 from core.state_store import InMemoryStateStore
 from core.tool_registry import (
     LocalToolAdapter,
@@ -58,7 +59,7 @@ def register_tool(
     ))
 
 
-def build_runtime(*, eligible=True, fail_query=False):
+def build_runtime(*, eligible=True, fail_query=False, response_polisher=None):
     store = InMemoryStateStore()
     registry = ToolRegistry()
     calls = []
@@ -144,6 +145,7 @@ def build_runtime(*, eligible=True, fail_query=False):
         domain_runtime=domain,
         router=router,
         trace_store=trace_store,
+        response_polisher=response_polisher,
     )
     return runtime, store, calls, trace_store
 
@@ -487,6 +489,59 @@ def test_policy_question_uses_rag_and_returns_citation():
     assert result.knowledge_used is True
     assert result.citations[0]["source"] == "policy.md"
     assert [name for name, _ in calls] == ["rag_search"]
+
+
+def test_runtime_polishes_completed_rag_response_and_traces_result():
+    polish_calls = []
+
+    async def polish_llm(prompt):
+        polish_calls.append(prompt)
+        return (
+            '{"response":"根据退款政策，购买后七天内可以申请退款。[1]",'
+            '"changed_meaning":false}'
+        )
+
+    polisher = ResponsePolisher(polish_llm, min_chars=0)
+    runtime, _, calls, traces = build_runtime(response_polisher=polisher)
+
+    result = run(runtime.run(
+        "user-1",
+        "conv-polish",
+        "退款政策是什么",
+    ))
+
+    assert result.response == "根据退款政策，购买后七天内可以申请退款。[1]"
+    assert len(polish_calls) == 1
+    assert [name for name, _ in calls] == ["rag_search"]
+    event = next(
+        item
+        for item in traces.get(result.trace_id)
+        if item["event"] == "response_polish"
+    )
+    assert event["applied"] is True
+    assert event["fallback"] is False
+    assert event["response_kind"] == "rag"
+
+
+def test_runtime_does_not_polish_clarification_response():
+    polish_calls = []
+
+    async def polish_llm(prompt):
+        polish_calls.append(prompt)
+        return '{"response":"不应调用","changed_meaning":false}'
+
+    polisher = ResponsePolisher(polish_llm, min_chars=0)
+    runtime, _, _, traces = build_runtime(response_polisher=polisher)
+
+    result = run(runtime.run("user-1", "conv-no-polish", "我要退款"))
+
+    assert result.status == "awaiting_user"
+    assert "订单号" in result.response
+    assert polish_calls == []
+    assert all(
+        item["event"] != "response_polish"
+        for item in traces.get(result.trace_id)
+    )
 
 
 def test_trace_store_returns_typed_public_events():

@@ -24,6 +24,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
+from core.prompts.legacy import build_entity_prompt, build_intent_prompt
+from core.prompts.types import PromptSpec
 
 from core.nlu_fast_track import fast_track_extract, build_understanding_from_fast_track
 from core.nlu_llm import understand_with_llm, make_fallback_understanding
@@ -39,12 +41,10 @@ logger = logging.getLogger(__name__)
 SlotValidator = Callable[[str, str], Awaitable[bool]]
 _SLOT_SIGNAL_PATTERNS = {
     "order_id": re.compile(
-        r"(?:订单(?:号|编号|id)|order\s*(?:id|no|number))",
-        re.IGNORECASE,
+        r"订单(?:号|编号)",
     ),
     "tracking_no": re.compile(
-        r"(?:物流(?:单)?号|快递(?:单)?号|运单号|tracking\s*(?:id|no|number))",
-        re.IGNORECASE,
+        r"(?:物流(?:单)?号|快递(?:单)?号|运单号)",
     ),
 }
 _SLOT_VALUE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{3,63}")
@@ -95,9 +95,9 @@ _TEMPLATES: Dict[IntentCategory, List[str]] = {
 
 # 紧急关键词
 _URGENCY_KEYWORDS = {
-    UrgencyLevel.CRITICAL: ["紧急", "emergency", "urgent", "asap", "立刻"],
-    UrgencyLevel.HIGH:     ["今天", "马上", "尽快", "hurry", "now"],
-    UrgencyLevel.MEDIUM:   ["这周", "soon", "快点"],
+    UrgencyLevel.CRITICAL: ["紧急", "立刻"],
+    UrgencyLevel.HIGH:     ["今天", "马上", "尽快"],
+    UrgencyLevel.MEDIUM:   ["这周", "快点"],
 }
 
 
@@ -274,12 +274,13 @@ class IntentRecognizer:
             signaled_slots = []
 
         # 2. Single structured LLM call (re-uses the Anthropic client)
-        async def _llm_fn(prompt: str) -> str:
+        async def _llm_fn(prompt: PromptSpec) -> str:
             resp = await self.client.messages.create(
                 model=self.model,
                 max_tokens=512,
                 temperature=0.1,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             return extract_text_content(resp.content)
 
@@ -419,40 +420,31 @@ class IntentRecognizer:
     ) -> Dict[str, Any]:
         """策略 1：LLM 语义理解（Few-shot + 上下文）。"""
         message = self._clean_text(message)
-        # 构建 Few-shot 示例
-        examples = "\n".join(
-            f'  消息: "{t}" → 意图: {cat.value}'
+        examples = [
+            {"message": t, "intent": cat.value}
             for cat, tpls in _TEMPLATES.items()
             for t in tpls[:1]  # 每类取 1 条，控制 prompt 长度
+        ]
+        prompt = build_intent_prompt(
+            message,
+            [
+                {
+                    "role": self._clean_text(m.get("role", "user")),
+                    "content": self._clean_text(m.get("content", "")),
+                }
+                for m in (history or [])[-3:]
+            ],
+            examples,
+            [category.value for category in IntentCategory],
         )
-        # 最近 3 轮对话上下文
-        ctx = ""
-        if history:
-            ctx = "\n最近对话:\n" + "\n".join(
-                f"  {self._clean_text(m.get('role', 'user'))}: {self._clean_text(m.get('content', ''))}"
-                for m in history[-3:]
-            )
-
-        prompt = f"""你是客服意图分析专家。根据示例判断用户意图，返回 JSON。
-
-示例:
-{examples}
-
-{ctx}
-用户消息: "{message}"
-
-返回格式（仅 JSON，不要其他文字）:
-{{"intent": "<意图值>", "confidence": <0-1>, "reasoning": "<一句话说明>"}}
-
-可选意图: {", ".join(c.value for c in IntentCategory)}"""
-        prompt = self._clean_text(prompt)
 
         try:
             resp = await self.client.messages.create(
                 model=self.model,
                 max_tokens=256,
                 temperature=0.1,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
@@ -487,14 +479,14 @@ class IntentRecognizer:
         """策略 3：关键词模式匹配（同步，零延迟兜底）。"""
         msg = message.lower()
         patterns = {
-            IntentCategory.ESCALATION: ["转人工", "经理", "supervisor", "人工客服"],
-            IntentCategory.COMPLAINT:  ["投诉", "太差", "糟糕", "horrible", "服务态度", "态度不好", "不满意", "等了很久"],
-            IntentCategory.QUERY:      ["?", "？", "怎么", "什么", "status"],
-            IntentCategory.REQUEST:    ["帮我", "需要", "please", "help"],
-            IntentCategory.GREETING:   ["你好", "嗨", "hello", "hi"],
-            IntentCategory.BILLING:    ["退款", "扣款", "发票", "refund"],
-            IntentCategory.TECHNICAL:  ["崩溃", "报错", "error", "crash"],
-            IntentCategory.ACCOUNT:    ["密码", "邮箱", "账户", "password"],
+            IntentCategory.ESCALATION: ["转人工", "经理", "人工客服"],
+            IntentCategory.COMPLAINT:  ["投诉", "太差", "糟糕", "服务态度", "态度不好", "不满意", "等了很久"],
+            IntentCategory.QUERY:      ["？", "怎么", "什么"],
+            IntentCategory.REQUEST:    ["帮我", "需要"],
+            IntentCategory.GREETING:   ["你好", "嗨"],
+            IntentCategory.BILLING:    ["退款", "扣款", "发票"],
+            IntentCategory.TECHNICAL:  ["崩溃", "报错"],
+            IntentCategory.ACCOUNT:    ["密码", "邮箱", "账户"],
         }
         best_cat, best_score = IntentCategory.OTHER, 0.0
         for cat, kws in patterns.items():
@@ -534,14 +526,12 @@ class IntentRecognizer:
     async def _extract_entities(self, message: str) -> Dict[str, List[str]]:
         """用 LLM 从消息中提取结构化实体。"""
         message = self._clean_text(message)
-        prompt = f"""从客服消息中提取实体，返回 JSON（字段值为列表，没有则为空列表）:
-消息: "{message}"
-格式: {{"order_id":[],"product":[],"date":[],"amount":[],"error_code":[]}}"""
-        prompt = self._clean_text(prompt)
+        prompt = build_entity_prompt(message)
         try:
             resp = await self.client.messages.create(
                 model=self.model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1

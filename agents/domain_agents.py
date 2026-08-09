@@ -15,7 +15,13 @@ from core.agent_models import (
     get_intent_schema,
     get_missing_slots,
 )
+from core.prompts.react import (
+    AFTER_SALES_DOMAIN_POLICY,
+    LOGISTICS_DOMAIN_POLICY,
+    ORDER_DOMAIN_POLICY,
+)
 from core.react_planner import ReActPlanner
+from core.tool_names import canonical_tool_name, logical_tool_name
 from core.tool_registry import ToolRegistry, ToolType
 from rag.query_planner import QueryPlanner
 
@@ -156,7 +162,10 @@ class GoalCompletionEvaluator:
             return False
         condition = get_intent_schema(intent).completion_condition
         observations = result.observations
-        names = {observation.name for observation in observations}
+        names = {
+            logical_tool_name(observation.name)
+            for observation in observations
+        }
 
         if condition in {"response_generated", "response_or_clarification_generated"}:
             return True
@@ -199,7 +208,7 @@ class GoalCompletionEvaluator:
             })
         if condition == "handoff_created":
             return any(
-                observation.name == "create_ticket"
+                logical_tool_name(observation.name) == "create_ticket"
                 and isinstance(observation.data, dict)
                 and observation.data.get("created") is True
                 for observation in observations
@@ -227,7 +236,23 @@ class ServiceAgent:
         self._registry = registry
         self._max_steps = max_steps
         self._planner = planner
-        self._registry.set_agent_whitelist(self.name, set(self.allowed_tools))
+        self._tool_names = {
+            name: (
+                canonical_tool_name(name)
+                if registry.get_spec(canonical_tool_name(name)) is not None
+                else name
+            )
+            for name in self.allowed_tools
+        }
+        self._resolved_allowed_tools = set(self._tool_names.values())
+        self._registry.set_agent_whitelist(
+            self.name,
+            self._resolved_allowed_tools,
+        )
+
+    def tool_name(self, logical_name: str) -> str:
+        """Resolve a logical tool to its registered domain-qualified name."""
+        return self._tool_names.get(logical_name, logical_name)
 
     async def execute(
         self,
@@ -319,7 +344,7 @@ class ServiceAgent:
                     completed=False,
                 )
             if task_state.confirmation_status == ConfirmationStatus.CONFIRMED:
-                if pending.tool_name not in self.allowed_tools:
+                if pending.tool_name not in self._resolved_allowed_tools:
                     return AgentResult(
                         agent=self.name,
                         success=False,
@@ -357,7 +382,10 @@ class ServiceAgent:
                         error=result.error,
                     )
 
-        react_tools = set(self.react_allowed_tools or self.allowed_tools)
+        react_tools = {
+            self.tool_name(name)
+            for name in (self.react_allowed_tools or self.allowed_tools)
+        }
         tool_specs = [
             spec
             for spec in self._registry.list_tools(self.name)
@@ -508,7 +536,7 @@ class ServiceAgent:
 
 class OrderAgent(ServiceAgent):
     name = ORDER_AGENT
-    system_prompt = "只根据订单和支付工具返回的事实回答，不猜测订单状态。"
+    system_prompt = ORDER_DOMAIN_POLICY
     allowed_tools = (
         "query_order",
         "query_order_items",
@@ -522,7 +550,7 @@ class OrderAgent(ServiceAgent):
         if observations:
             return None
         order_id = state.slots.get("order_id")
-        return "query_order", {"order_id": order_id}, None
+        return self.tool_name("query_order"), {"order_id": order_id}, None
 
     def finish(self, state, observations):
         del state
@@ -553,7 +581,7 @@ class OrderAgent(ServiceAgent):
 
 class LogisticsAgent(ServiceAgent):
     name = LOGISTICS_AGENT
-    system_prompt = "结合订单和物流轨迹解释配送状态，不编造预计时间。"
+    system_prompt = LOGISTICS_DOMAIN_POLICY
     allowed_tools = (
         "query_order",
         "track_package",
@@ -569,19 +597,27 @@ class LogisticsAgent(ServiceAgent):
         tracking_no = state.slots.get("tracking_no")
         if not observations:
             if tracking_no and not order_id:
-                return "track_package", {"tracking_no": tracking_no}, None
-            return "query_order", {"order_id": order_id}, None
+                return (
+                    self.tool_name("track_package"),
+                    {"tracking_no": tracking_no},
+                    None,
+                )
+            return self.tool_name("query_order"), {"order_id": order_id}, None
         if (
             len(observations) == 1
-            and observations[0].name == "query_order"
+            and logical_tool_name(observations[0].name) == "query_order"
             and observations[0].data.get("found", True)
         ):
-            return "track_package", {"order_id": order_id}, None
+            return (
+                self.tool_name("track_package"),
+                {"order_id": order_id},
+                None,
+            )
         return None
 
     def finish(self, state, observations):
         del state
-        if observations[-1].name == "query_order":
+        if logical_tool_name(observations[-1].name) == "query_order":
             return AgentResult(
                 agent=self.name,
                 success=True,
@@ -618,7 +654,7 @@ class LogisticsAgent(ServiceAgent):
 
 class AfterSalesAgent(ServiceAgent):
     name = AFTER_SALES_AGENT
-    system_prompt = "先核验订单和售后资格；创建退款前必须取得用户确认。"
+    system_prompt = AFTER_SALES_DOMAIN_POLICY
     allowed_tools = (
         "query_order",
         "check_refund_eligibility",
@@ -699,7 +735,10 @@ class AfterSalesAgent(ServiceAgent):
         context: str,
     ) -> AgentResult:
         pending = state.pending_action
-        if pending is not None and pending.tool_name == "create_ticket":
+        if (
+            pending is not None
+            and logical_tool_name(pending.tool_name) == "create_ticket"
+        ):
             if state.confirmation_status == ConfirmationStatus.PENDING:
                 return AgentResult(
                     agent=self.name,
@@ -752,7 +791,7 @@ class AfterSalesAgent(ServiceAgent):
             else "用户申请转人工"
         )
         action = PendingAction(
-            tool_name="create_ticket",
+            tool_name=self.tool_name("create_ticket"),
             arguments={
                 "subject": subject,
                 "description": message or subject,
@@ -788,10 +827,10 @@ class AfterSalesAgent(ServiceAgent):
                 else (pending.tool_name, arguments, pending.action_id)
             )
         if not observations:
-            return "query_order", {"order_id": order_id}, None
+            return self.tool_name("query_order"), {"order_id": order_id}, None
         if len(observations) == 1 and observations[0].data.get("found", True):
             return (
-                "check_refund_eligibility",
+                self.tool_name("check_refund_eligibility"),
                 {"order_id": order_id},
                 None,
             )
@@ -799,7 +838,10 @@ class AfterSalesAgent(ServiceAgent):
 
     def finish(self, state, observations):
         pending = state.pending_action
-        if pending is not None and observations[-1].name == "create_refund":
+        if (
+            pending is not None
+            and logical_tool_name(observations[-1].name) == "create_refund"
+        ):
             refund = RefundCreateOutput.model_validate(
                 observations[-1].data or {},
             )
@@ -818,7 +860,7 @@ class AfterSalesAgent(ServiceAgent):
                 observations=observations,
             )
 
-        if observations[-1].name == "query_order":
+        if logical_tool_name(observations[-1].name) == "query_order":
             return AgentResult(
                 agent=self.name,
                 success=True,
@@ -836,7 +878,7 @@ class AfterSalesAgent(ServiceAgent):
             )
 
         action = PendingAction(
-            tool_name="create_refund",
+            tool_name=self.tool_name("create_refund"),
             arguments={"order_id": state.slots.get("order_id")},
         )
         self._registry.mark_pending_action(action.action_id)
@@ -863,7 +905,13 @@ class KnowledgeAgent:
     ) -> None:
         self._registry = registry
         self._query_planner = query_planner
-        self._registry.set_agent_whitelist(self.name, set(self.allowed_tools))
+        canonical_name = canonical_tool_name("rag_search")
+        self._rag_tool = (
+            canonical_name
+            if registry.get_spec(canonical_name) is not None
+            else "rag_search"
+        )
+        self._registry.set_agent_whitelist(self.name, {self._rag_tool})
 
     @staticmethod
     def _contextual_query(message: str, context: str) -> str:
@@ -935,7 +983,7 @@ class KnowledgeAgent:
         queries = queries[:planner.max_queries]
         result = await self._registry.call(
             self.name,
-            "rag_search",
+            self._rag_tool,
             {
                 "query": primary_query,
                 "queries": queries,
@@ -1102,7 +1150,7 @@ class DomainAgentRuntime:
             results.append(result)
             for observation in result.observations:
                 if (
-                    observation.name == "query_order"
+                    logical_tool_name(observation.name) == "query_order"
                     and observation.success
                     and isinstance(observation.data, dict)
                     and observation.data.get("order_id")

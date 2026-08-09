@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from anthropic import AsyncAnthropic
 
 from core.llm_utils import extract_text_content
+from core.prompts.rag import build_query_rewrite_prompt, build_rerank_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -270,15 +271,12 @@ class MCPToolManager:
           原始: "退款流程"
           改写: ["如何申请退款", "退款需要多少天", "退款政策是什么"]
         """
-        prompt = f"""将以下用户查询改写为 {n} 个不同角度的搜索子查询，用于检索知识库。
-要求：每个子查询角度不同，覆盖原始问题的不同方面。
-原始查询: "{query}"
-返回 JSON 数组，例如: ["子查询1", "子查询2", "子查询3"]"""
-        prompt = self._clean_text(prompt)
+        prompt = build_query_rewrite_prompt(self._clean_text(query), n)
         try:
             resp = await self._client.messages.create(
                 model=self._model, max_tokens=256, temperature=0.3,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("["), raw.rfind("]") + 1
@@ -343,21 +341,17 @@ class MCPToolManager:
             return items
 
         # 将结果序列化为文本供 LLM 评分
-        items_text = "\n".join(f"{i}. {json.dumps(item, ensure_ascii=False)[:200]}"
-                               for i, item in enumerate(items))
-        prompt = f"""根据用户查询，对以下检索结果按相关性打分（0-10），返回 JSON 数组。
-用户查询: "{query}"
-检索结果:
-{items_text}
-
-返回格式（按相关性降序排列的索引列表）: [最相关的索引, ..., 最不相关的索引]
-只返回 JSON 数组，不要其他文字。"""
-        prompt = self._clean_text(prompt)
+        candidates = [
+            {"index": index, "content": json.dumps(item, ensure_ascii=False)[:200]}
+            for index, item in enumerate(items)
+        ]
+        prompt = build_rerank_prompt(self._clean_text(query), candidates)
 
         try:
             resp = await self._client.messages.create(
                 model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
+                system=prompt.system,
+                messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
             s, e = raw.find("["), raw.rfind("]") + 1

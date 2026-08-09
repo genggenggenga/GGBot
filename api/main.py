@@ -120,9 +120,11 @@ async def _runtime_components(app: FastAPI):
     from core.customer_agent_runtime import CustomerAgentRuntime
     from core.dialogue_state_tracker import DialogueStateTracker
     from core.intent_recognizer import IntentRecognizer
-    from core.mcp_adapter import MCPClient, MCPToolAdapter
+    from core.mcp_adapter import MCPClient, MCPClientManager, MCPToolAdapter
     from core.react_planner import ReActPlanner
+    from core.response_polisher import ResponsePolisher
     from core.state_store import RedisStateStore
+    from core.tool_names import canonical_tool_name
     from core.tool_registry import ToolRegistry
     from core.trace_store import TraceStore
     from core.turn_engine import TurnEngine
@@ -132,8 +134,8 @@ async def _runtime_components(app: FastAPI):
     from core.skill_loader import SkillManager
     from rag.runtime import KnowledgeRuntime, local_models_enabled
     from rag.query_planner import QueryPlanner
-    from rag.tool import register_rag_tool
     from core.llm_utils import extract_text_content
+    from core.prompts.types import PromptSpec
     import redis
 
     cfg = _anthropic_cfg()
@@ -198,14 +200,13 @@ async def _runtime_components(app: FastAPI):
         rrf_threshold=float(os.getenv("RAG_RRF_THRESHOLD", "0.01")),
         rerank_threshold=float(os.getenv("RAG_RERANK_THRESHOLD", "0.1")),
     )
-    register_rag_tool(registry, _knowledge_runtime.retriever)
-
-    async def plan_query(prompt: str) -> str:
+    async def plan_query(prompt: PromptSpec) -> str:
         response = await recognizer.client.messages.create(
             model=cfg["model"],
             max_tokens=512,
             temperature=0.1,
-            messages=[{"role": "user", "content": prompt}],
+            system=prompt.system,
+            messages=[{"role": "user", "content": prompt.user}],
         )
         return extract_text_content(response.content)
 
@@ -226,23 +227,46 @@ async def _runtime_components(app: FastAPI):
         in {"1", "true", "yes", "on"}
         else None
     )
-
-    _mcp_client = MCPClient(
-        command=sys.executable,
-        args=["-m", "mcp_server.customer_service_server"],
-        env={**os.environ, "PYTHONPATH": _ROOT},
+    response_polisher = ResponsePolisher(
+        plan_query,
+        enabled=os.getenv(
+            "RESPONSE_POLISH_ENABLED",
+            "true",
+        ).lower() in {"1", "true", "yes", "on"},
+        min_chars=int(os.getenv("RESPONSE_POLISH_MIN_CHARS", "120")),
+        timeout_s=float(os.getenv("RESPONSE_POLISH_TIMEOUT_S", "3")),
     )
+
+    mcp_env = {**os.environ, "PYTHONPATH": _ROOT}
+    _mcp_client = MCPClientManager({
+        namespace: MCPClient(
+            command=sys.executable,
+            args=["-m", module],
+            env=mcp_env,
+        )
+        for namespace, module in {
+            "commerce": "mcp_server.commerce_server",
+            "fulfillment": "mcp_server.fulfillment_server",
+            "after_sales": "mcp_server.after_sales_server",
+            "knowledge": "mcp_server.knowledge_server",
+        }.items()
+    })
     await _mcp_client.connect()
-    for adapter in await MCPToolAdapter.discover(
-        _mcp_client,
-        write_tools={
-            "create_refund",
-            "create_return",
-            "cancel_order",
-            "create_ticket",
-        },
-    ):
-        registry.register(adapter)
+    write_tools = {
+        "create_refund",
+        "create_return",
+        "cancel_order",
+        "create_ticket",
+    }
+    for namespace, client in _mcp_client.clients.items():
+        for adapter in await MCPToolAdapter.discover(
+            client,
+            namespace=namespace,
+            write_tools=(
+                write_tools if namespace == "after_sales" else set()
+            ),
+        ):
+            registry.register(adapter)
 
     router = Router()
     domain_runtime = DomainAgentRuntime(router, {
@@ -254,10 +278,14 @@ async def _runtime_components(app: FastAPI):
 
     async def validate_recovered_slot(slot_name: str, value: str) -> bool:
         validation_tools = {
-            "order_id": ("order", "query_order", {"order_id": value}),
+            "order_id": (
+                "order",
+                canonical_tool_name("query_order"),
+                {"order_id": value},
+            ),
             "tracking_no": (
                 "logistics",
-                "track_package",
+                canonical_tool_name("track_package"),
                 {"tracking_no": value},
             ),
         }
@@ -279,6 +307,7 @@ async def _runtime_components(app: FastAPI):
         domain_runtime=domain_runtime,
         router=router,
         trace_store=_trace_store,
+        response_polisher=response_polisher,
     )
 
     # 性能监控（可选启动 Prometheus）
