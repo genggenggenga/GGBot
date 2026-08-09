@@ -77,7 +77,9 @@ async def _runtime_components(app: FastAPI):
     global _customer_runtime, _trace_store, _knowledge_runtime
     global _tool_registry, _conversation_locks
 
-    print(BANNER, flush=True)
+    # CLI 模式下由 _cli() 负责打印横幅与欢迎语，避免重复输出。
+    if "--cli" not in sys.argv:
+        print(BANNER, flush=True)
 
     from agents.domain_agents import (
         AfterSalesAgent,
@@ -318,7 +320,11 @@ async def _runtime_components(app: FastAPI):
     )
 
     # 性能监控（可选启动 Prometheus）
+    # CLI 模式作为第二个进程运行在已有 API 容器内，端口已被占用，
+    # 且交互对话无需独立指标端点，故跳过 Prometheus。
     prom_port = int(os.getenv("PROMETHEUS_PORT", "0")) or None
+    if "--cli" in sys.argv:
+        prom_port = None
     _monitor = PerformanceMonitor(
         runtime=_customer_runtime,
         tool_registry=registry,

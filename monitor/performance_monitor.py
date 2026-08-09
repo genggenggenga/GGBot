@@ -10,6 +10,7 @@
   4. 告警 —— 超阈值时打日志 + 可选 Webhook
 """
 import asyncio
+import errno
 import logging
 import statistics
 from collections import defaultdict, deque
@@ -151,8 +152,18 @@ class PerformanceMonitor:
             "tool_success_rate":  Gauge("tool_success_rate", "工具成功率", ["tool"]),
             "requests_total":     Counter("requests_total", "总请求数"),
         }
-        start_http_server(port)
-        logger.info(f"Prometheus 已启动: :{port}")
+        try:
+            start_http_server(port)
+            logger.info(f"Prometheus 已启动: :{port}")
+        except OSError as ex:
+            if ex.errno == errno.EADDRINUSE:
+                logger.warning(
+                    "Prometheus 端口 %s 已被占用，跳过指标 HTTP 服务"
+                    "（可能是已有实例在运行）",
+                    port,
+                )
+            else:
+                raise
 
     # ── 生命周期 ──────────────────────────────────────────────────────────────
 
