@@ -279,8 +279,7 @@ class MCPToolManager:
                 messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
-            s, e = raw.find("["), raw.rfind("]") + 1
-            queries = json.loads(raw[s:e])
+            queries = json.loads(raw)
             # 原始查询也保留，去重
             return list(dict.fromkeys([query] + queries))
         except Exception as ex:
@@ -354,8 +353,7 @@ class MCPToolManager:
                 messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
-            s, e = raw.find("["), raw.rfind("]") + 1
-            order: List[int] = json.loads(raw[s:e])
+            order: List[int] = json.loads(raw)
             reranked = [items[i] for i in order if 0 <= i < len(items)]
             return reranked[:top_k]
         except Exception as ex:

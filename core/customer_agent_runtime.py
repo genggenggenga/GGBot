@@ -238,7 +238,6 @@ class CustomerAgentRuntime:
                 "total": stats.total,
                 "success_rate": round(stats.success_rate, 3),
                 "avg_ms": round(stats.avg_ms, 1),
-                "routing_score": round(stats.success_rate, 3),
             }
             for agent, stats in self._stats.items()
         }

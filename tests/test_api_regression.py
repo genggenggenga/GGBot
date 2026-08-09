@@ -42,14 +42,15 @@ def test_health_and_skill_endpoints_remain_compatible(monkeypatch):
     )
     registry = SimpleNamespace(
         get_stats=lambda: {"rag_search": {"total": 1}},
+        list_tools=lambda: [],
     )
     monkeypatch.setattr(api_main, "_orchestrator", orchestrator)
     monkeypatch.setattr(api_main, "_skill_manager", skills)
     monkeypatch.setattr(api_main, "_customer_runtime", runtime)
     monkeypatch.setattr(api_main, "_tool_registry", registry)
     monkeypatch.setattr(api_main, "_memory", object())
-    monkeypatch.setattr(api_main, "_mcp_client", object())
     monkeypatch.setattr(api_main, "_knowledge_runtime", object())
+    monkeypatch.setattr(api_main, "_conversation_locks", object())
 
     health = run(api_main.health())
     assert health["status"] == "ok"
@@ -65,8 +66,8 @@ def test_health_rejects_partial_primary_runtime(monkeypatch):
     monkeypatch.setattr(api_main, "_customer_runtime", object())
     monkeypatch.setattr(api_main, "_tool_registry", None)
     monkeypatch.setattr(api_main, "_memory", object())
-    monkeypatch.setattr(api_main, "_mcp_client", object())
     monkeypatch.setattr(api_main, "_knowledge_runtime", object())
+    monkeypatch.setattr(api_main, "_conversation_locks", object())
 
     with pytest.raises(HTTPException) as exc_info:
         run(api_main.health())
@@ -75,49 +76,39 @@ def test_health_rejects_partial_primary_runtime(monkeypatch):
     assert "tool_registry" in str(exc_info.value.detail)
 
 
-def test_mcp_tools_endpoint_returns_discovered_tool_contracts(monkeypatch):
-    class Annotations:
-        def model_dump(self, **kwargs):
-            assert kwargs["by_alias"] is True
-            return {"readOnlyHint": True}
-
-    class MCPClient:
-        async def list_tools(self):
-            return [
-                SimpleNamespace(
-                    name="query_order",
-                    title="Query order",
-                    description="Query an order",
-                    inputSchema={
-                        "type": "object",
-                        "required": ["order_id"],
-                    },
-                    outputSchema={"type": "object"},
-                    annotations=Annotations(),
-                ),
-                SimpleNamespace(
-                    name="create_refund",
-                    title=None,
-                    description=None,
-                    inputSchema={"type": "object"},
-                    outputSchema=None,
-                    annotations=None,
-                ),
-            ]
-
-    monkeypatch.setattr(api_main, "_mcp_client", MCPClient())
+def test_compat_tools_endpoint_returns_internal_rpc_contracts(monkeypatch):
+    registry = SimpleNamespace(
+        list_tools=lambda: [
+            SimpleNamespace(
+                name="commerce.query_order",
+                description="Query an order",
+                input_schema={
+                    "type": "object",
+                    "required": ["order_id"],
+                },
+                output_schema={"type": "object"},
+            ),
+            SimpleNamespace(
+                name="after_sales.create_refund",
+                description="Create refund",
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+            ),
+        ],
+    )
+    monkeypatch.setattr(api_main, "_tool_registry", registry)
 
     result = run(api_main.list_mcp_tools())
 
     assert result.total == 2
-    assert result.tools[0].name == "query_order"
+    assert result.tools[0].name == "commerce.query_order"
     assert result.tools[0].input_schema["required"] == ["order_id"]
-    assert result.tools[0].annotations == {"readOnlyHint": True}
-    assert result.tools[1].description == ""
+    assert result.tools[0].annotations is None
+    assert result.tools[1].description == "Create refund"
 
 
-def test_mcp_tools_endpoint_rejects_uninitialized_client(monkeypatch):
-    monkeypatch.setattr(api_main, "_mcp_client", None)
+def test_tools_endpoint_rejects_uninitialized_registry(monkeypatch):
+    monkeypatch.setattr(api_main, "_tool_registry", None)
 
     with pytest.raises(HTTPException) as exc_info:
         run(api_main.list_mcp_tools())
@@ -347,17 +338,8 @@ def test_cli_reuses_primary_chat_runtime():
     assert "AgentOrchestrator" not in source
 
 
-@pytest.mark.asyncio
-async def test_background_tasks_are_tracked_and_drained():
-    completed = []
+def test_chat_records_episodic_memory_inside_conversation_transaction():
+    source = inspect.getsource(api_main._chat_locked)
 
-    async def work():
-        await asyncio.sleep(0)
-        completed.append("done")
-
-    task = api_main._spawn_background_task(work(), name="test-work")
-
-    assert task in api_main._background_tasks
-    await api_main._drain_background_tasks()
-    assert completed == ["done"]
-    assert not api_main._background_tasks
+    assert "await _memory.record_episodic_event(" in source
+    assert "_spawn_background_task" not in source

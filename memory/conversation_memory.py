@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING
 import chromadb
 import redis
 from anthropic import AsyncAnthropic
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.llm_utils import extract_text_content
 from core.prompts.memory import build_profile_prompt, build_summary_prompt
@@ -38,6 +39,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _EMBEDDING_FUNCTION_UNSET = object()
+
+
+class _UserProfileOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preferences: List[str] = Field(default_factory=list)
+    language: Optional[str] = None
+    communication_preference: Optional[str] = None
+    contact_preference: Optional[str] = None
+    timezone: Optional[str] = None
+    accessibility: Optional[str] = None
 
 
 async def _backend_call(func, *args, **kwargs):
@@ -208,6 +220,7 @@ class MemoryManager:
         base_url:     Optional[str] = None,
         model:        str = "claude-3-5-sonnet-20241022",
         state_store:  Optional["StateStore"] = None,
+        structured_client: Optional[Any] = None,
         # 测试用注入点
         redis_client: Optional[Any] = None,
         chroma_client: Optional[Any] = None,
@@ -219,6 +232,7 @@ class MemoryManager:
         self._client = AsyncAnthropic(**kwargs)
         self._model  = model
         self._state_store = state_store
+        self._structured_client = structured_client
 
         # Redis 客户端（支持注入 fake）
         if redis_client is not None:
@@ -318,16 +332,23 @@ class MemoryManager:
         ])
 
         try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=256, temperature=0.0,
-                system=prompt.system,
-                messages=[{"role": "user", "content": prompt.user}],
-            )
-            raw = extract_text_content(resp.content)
-            s, e = raw.find("{"), raw.rfind("}") + 1
-            if s < 0 or e <= s:
-                return
-            profile_data = json.loads(raw[s:e])
+            if self._structured_client is not None:
+                output = await self._structured_client.generate(
+                    prompt,
+                    _UserProfileOutput,
+                    tool_name="submit_user_profile",
+                    max_tokens=256,
+                    temperature=0.0,
+                )
+                profile_data = output.model_dump(exclude_none=True)
+            else:
+                resp = await self._client.messages.create(
+                    model=self._model, max_tokens=256, temperature=0.0,
+                    system=prompt.system,
+                    messages=[{"role": "user", "content": prompt.user}],
+                )
+                raw = extract_text_content(resp.content)
+                profile_data = json.loads(raw)
 
             # 字段白名单过滤 + 时效事实内容过滤
             filtered = self._filter_profile_data(profile_data)

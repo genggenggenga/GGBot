@@ -29,6 +29,7 @@ from core.tool_registry import (
     ToolSpec,
     ToolType,
 )
+from rag.answer_generator import RAGAnswerGenerator
 from rag.query_planner import QueryPlanner
 
 
@@ -427,6 +428,86 @@ def test_knowledge_agent_calls_rag_once_and_returns_citation():
     assert result.citations[0]["source"] == "policy.md"
 
 
+def test_knowledge_agent_generates_answer_from_multiple_rag_hits():
+    registry = ToolRegistry()
+
+    async def rag_search(params, context):
+        return {
+            "answered": True,
+            "hits": [
+                {"chunk": {
+                    "chunk_id": "policy-1",
+                    "content": "商品签收后七天内可以申请退款。",
+                }},
+                {"chunk": {
+                    "chunk_id": "policy-2",
+                    "content": "审核通过后退款原路退回。",
+                }},
+            ],
+            "citations": [
+                {"citation_id": "[1]", "source": "refund.md"},
+                {"citation_id": "[2]", "source": "payment.md"},
+            ],
+        }
+
+    async def generate_answer(prompt):
+        assert "商品签收后七天内可以申请退款" in prompt.user
+        assert "审核通过后退款原路退回" in prompt.user
+        return """{
+          "answer": "商品签收后七天内可以申请退款。[1]\\n审核通过后退款原路退回。[2]",
+          "used_citations": ["[1]", "[2]"],
+          "sufficient_evidence": true
+        }"""
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    result = run(KnowledgeAgent(
+        registry,
+        answer_generator=RAGAnswerGenerator(generate_answer),
+    ).execute(
+        DialogueState(active_intent="refund_policy"),
+        "退款期限和退款渠道是什么",
+    ))
+
+    assert result.success
+    assert "[1]" in result.response
+    assert "[2]" in result.response
+    assert len(result.citations) == 2
+
+
+def test_knowledge_agent_refuses_when_generator_reports_insufficient_evidence():
+    registry = ToolRegistry()
+
+    async def rag_search(params, context):
+        return {
+            "answered": True,
+            "hits": [{"chunk": {
+                "chunk_id": "policy-1",
+                "content": "订单支付后可以查询物流。",
+            }}],
+            "citations": [{"citation_id": "[1]", "source": "order.md"}],
+        }
+
+    async def generate_answer(prompt):
+        return """{
+          "answer": "",
+          "used_citations": [],
+          "sufficient_evidence": false
+        }"""
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    result = run(KnowledgeAgent(
+        registry,
+        answer_generator=RAGAnswerGenerator(generate_answer),
+    ).execute(
+        DialogueState(active_intent="account"),
+        "如何修改绑定手机号",
+    ))
+
+    assert result.success
+    assert result.response == "根据现有资料无法回答该问题。"
+    assert result.citations == []
+
+
 def test_knowledge_agent_formats_temporal_version_comparison():
     registry = ToolRegistry()
 
@@ -464,7 +545,7 @@ def test_knowledge_agent_formats_temporal_version_comparison():
     assert result.response.endswith("[1][2]")
 
 
-def test_knowledge_agent_uses_skill_and_memory_context_in_retrieval_query():
+def test_knowledge_agent_excludes_skill_but_uses_memory_in_retrieval_query():
     registry = ToolRegistry()
     queries = []
 
@@ -492,7 +573,7 @@ def test_knowledge_agent_uses_skill_and_memory_context_in_retrieval_query():
     assert result.success
     assert len(queries) == 1
     assert "这个要多久" in queries[0]
-    assert "退款需要先核验订单" in queries[0]
+    assert "退款需要先核验订单" not in queries[0]
     assert "用户此前询问退款到账" in queries[0]
     assert "上次退款使用原支付渠道" in queries[0]
     assert "language" in queries[0]
@@ -673,14 +754,26 @@ def test_runtime_evaluates_completion_condition_for_each_goal():
     assert all(result.completed for result in results)
 
 
-def test_skill_loader_maps_legacy_agents_and_reads_new_metadata():
+def test_skill_loader_reads_after_sales_skill_metadata():
     root = Path(__file__).parent.parent / "skills"
     manager = SkillManager(str(root))
     skills = manager.load()
-    billing = next(skill for skill in skills if skill.name == "账单退款处理规范")
+    after_sales = next(
+        skill for skill in skills
+        if skill.name == "售后处理软策略"
+    )
 
-    assert billing.agents == [KNOWLEDGE_AGENT, AFTER_SALES_AGENT]
-    assert "refund_request" in billing.intents
-    assert billing.version == "2"
-    assert billing.eval_cases == ["refund_policy", "refund_request"]
-    assert billing.matches("我要退款", AFTER_SALES_AGENT, "refund_request")
+    assert after_sales.agents == [AFTER_SALES_AGENT]
+    assert "refund_request" in after_sales.intents
+    assert after_sales.version == "1"
+    assert "refund_request" in after_sales.eval_cases
+    assert after_sales.matches(
+        "我要退款",
+        AFTER_SALES_AGENT,
+        "refund_request",
+    )
+    assert not after_sales.matches(
+        "查询订单",
+        ORDER_AGENT,
+        "order_query",
+    )

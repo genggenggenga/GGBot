@@ -203,7 +203,6 @@ async def test_lifespan_releases_resources_when_startup_fails(monkeypatch):
         yield
 
     monkeypatch.setattr(api_main, "_monitor", Resource("monitor"))
-    monkeypatch.setattr(api_main, "_mcp_client", Resource("mcp"))
     monkeypatch.setattr(api_main, "_memory", Resource("memory"))
     monkeypatch.setattr(api_main, "_runtime_components", failing_components)
 
@@ -211,7 +210,7 @@ async def test_lifespan_releases_resources_when_startup_fails(monkeypatch):
         async with api_main.lifespan(api_main.app):
             pass
 
-    assert calls == ["monitor", "mcp", "memory"]
+    assert calls == ["monitor", "memory"]
 
 
 @pytest.mark.asyncio
@@ -234,11 +233,10 @@ async def test_lifespan_releases_resources_after_normal_shutdown(monkeypatch):
         yield
 
     monkeypatch.setattr(api_main, "_monitor", Resource("monitor"))
-    monkeypatch.setattr(api_main, "_mcp_client", Resource("mcp"))
     monkeypatch.setattr(api_main, "_memory", Resource("memory"))
     monkeypatch.setattr(api_main, "_runtime_components", components)
 
     async with api_main.lifespan(api_main.app):
         pass
 
-    assert calls == ["monitor", "mcp", "memory"]
+    assert calls == ["monitor", "memory"]

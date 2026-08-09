@@ -26,6 +26,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
+from core.conversation_lock import ConversationLockTimeout
+
 load_dotenv()
 
 logging.basicConfig(
@@ -50,42 +52,10 @@ _monitor      = None
 _evaluator    = None
 _skill_manager = None
 _customer_runtime = None
-_mcp_client = None
 _trace_store = None
 _knowledge_runtime = None
 _tool_registry = None
-_background_tasks: set[asyncio.Task] = set()
-
-
-def _spawn_background_task(coro, *, name: str) -> asyncio.Task:
-    """Track fire-and-forget work so failures and shutdown are observable."""
-    task = asyncio.create_task(coro, name=name)
-    _background_tasks.add(task)
-
-    def done(completed: asyncio.Task) -> None:
-        _background_tasks.discard(completed)
-        if completed.cancelled():
-            return
-        error = completed.exception()
-        if error is not None:
-            logger.error("后台任务 %s 失败: %s", completed.get_name(), error)
-
-    task.add_done_callback(done)
-    return task
-
-
-async def _drain_background_tasks(timeout_s: float = 5.0) -> None:
-    """Wait for tracked work during shutdown, then cancel stragglers."""
-    if not _background_tasks:
-        return
-    tasks = list(_background_tasks)
-    done, pending = await asyncio.wait(tasks, timeout=timeout_s)
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    for task in done:
-        _background_tasks.discard(task)
+_conversation_locks = None
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -104,8 +74,8 @@ def _anthropic_cfg() -> Dict[str, Any]:
 @asynccontextmanager
 async def _runtime_components(app: FastAPI):
     global _orchestrator, _memory, _monitor, _evaluator, _skill_manager
-    global _customer_runtime, _mcp_client, _trace_store, _knowledge_runtime
-    global _tool_registry
+    global _customer_runtime, _trace_store, _knowledge_runtime
+    global _tool_registry, _conversation_locks
 
     print(BANNER, flush=True)
 
@@ -118,12 +88,16 @@ async def _runtime_components(app: FastAPI):
         Router,
     )
     from core.customer_agent_runtime import CustomerAgentRuntime
+    from core.conversation_lock import RedisConversationLockManager
     from core.dialogue_state_tracker import DialogueStateTracker
+    from core.idempotency import RedisActionExecutionRepository
+    from core.internal_rpc import build_mock_rpc_clients
     from core.intent_recognizer import IntentRecognizer
-    from core.mcp_adapter import MCPClient, MCPClientManager, MCPToolAdapter
     from core.react_planner import ReActPlanner
     from core.response_polisher import ResponsePolisher
+    from core.rpc_tools import register_internal_rpc_tools
     from core.state_store import RedisStateStore
+    from core.structured_llm import StructuredLLMClient
     from core.tool_names import canonical_tool_name
     from core.tool_registry import ToolRegistry
     from core.trace_store import TraceStore
@@ -132,11 +106,13 @@ async def _runtime_components(app: FastAPI):
     from memory.conversation_memory import MemoryManager
     from monitor.performance_monitor import PerformanceMonitor
     from core.skill_loader import SkillManager
+    from rag.answer_generator import RAGAnswerGenerator
     from rag.runtime import KnowledgeRuntime, local_models_enabled
     from rag.query_planner import QueryPlanner
+    from rag.tool import register_rag_tool
     from core.llm_utils import extract_text_content
     from core.prompts.types import PromptSpec
-    import redis
+    import redis.asyncio as redis
 
     cfg = _anthropic_cfg()
     logger.info(f"模型: {cfg['model']}  base_url: {cfg.get('base_url', '(官方)')}")
@@ -147,6 +123,11 @@ async def _runtime_components(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
     )
+    structured_client = StructuredLLMClient(
+        recognizer.client,
+        cfg["model"],
+    )
+    recognizer.set_structured_client(structured_client)
 
     # Skills：启动时从目录加载业务能力说明，并在 Agent 调用 LLM 时动态注入。
     skills_dir = os.getenv("GGBOT_SKILLS_DIR", str(pathlib.Path(_ROOT) / "skills"))
@@ -161,8 +142,19 @@ async def _runtime_components(app: FastAPI):
         os.getenv("REDIS_URL", "redis://redis:6379/0"),
         decode_responses=True,
     )
+    _conversation_locks = RedisConversationLockManager(
+        redis_client,
+        lease_s=float(os.getenv("CONVERSATION_LOCK_LEASE_S", "60")),
+        wait_timeout_s=float(
+            os.getenv("CONVERSATION_LOCK_WAIT_TIMEOUT_S", "30"),
+        ),
+        retry_interval_s=float(
+            os.getenv("CONVERSATION_LOCK_RETRY_INTERVAL_S", "0.05"),
+        ),
+    )
     state_store = RedisStateStore(redis_client)
-    _memory = MemoryManager(
+    _memory = await asyncio.to_thread(
+        MemoryManager,
         chroma_host=os.getenv("CHROMA_HOST", "chromadb"),
         chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
         chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/app/data/chroma"),
@@ -170,22 +162,26 @@ async def _runtime_components(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         state_store=state_store,
+        structured_client=structured_client,
         redis_client=redis_client,
     )
 
     # RAG 知识库（基于 ChromaDB 的真实检索）
-    kb = KnowledgeBase(
+    kb = await asyncio.to_thread(
+        KnowledgeBase,
         chroma_host=os.getenv("CHROMA_HOST", "chromadb"),
         chroma_port=int(os.getenv("CHROMA_PORT", "8000")),
         chroma_path=os.getenv("CHROMA_PERSIST_DIRECTORY", "/app/data/chroma"),
     )
-    logger.info(f"知识库已加载: {kb.doc_count} 个文档片段")
+    doc_count = await asyncio.to_thread(lambda: kb.doc_count)
+    logger.info("知识库已加载: %s 个文档片段", doc_count)
 
     # 新运行时统一通过 ToolRegistry 调用 Hybrid RAG 与标准 MCP 工具。
     registry = ToolRegistry()
     _tool_registry = registry
     legacy_threshold = os.getenv("RAG_RELEVANCE_THRESHOLD")
-    _knowledge_runtime = KnowledgeRuntime.build(
+    _knowledge_runtime = await asyncio.to_thread(
+        KnowledgeRuntime.build,
         kb,
         enable_local_models=local_models_enabled(),
         embedding_provider=os.getenv("RAG_EMBEDDING_PROVIDER"),
@@ -212,6 +208,7 @@ async def _runtime_components(app: FastAPI):
 
     query_planner = QueryPlanner(
         plan_query,
+        structured_client=structured_client,
         enabled=os.getenv(
             "RAG_MULTI_QUERY_ENABLED",
             "true",
@@ -221,14 +218,32 @@ async def _runtime_components(app: FastAPI):
             os.getenv("RAG_QUERY_REWRITE_MIN_CONFIDENCE", "0.5"),
         ),
     )
+    answer_generator = (
+        RAGAnswerGenerator(
+            plan_query,
+            structured_client=structured_client,
+            max_chunks=int(os.getenv("RAG_ANSWER_MAX_CHUNKS", "5")),
+            max_context_tokens=int(
+                os.getenv("RAG_ANSWER_MAX_CONTEXT_TOKENS", "1800"),
+            ),
+            timeout_s=float(os.getenv("RAG_ANSWER_TIMEOUT_S", "8")),
+        )
+        if os.getenv("RAG_GENERATION_ENABLED", "true").lower()
+        in {"1", "true", "yes", "on"}
+        else None
+    )
     react_planner = (
-        ReActPlanner(plan_query)
+        ReActPlanner(
+            plan_query,
+            structured_client=structured_client,
+        )
         if os.getenv("REACT_ENABLED", "true").lower()
         in {"1", "true", "yes", "on"}
         else None
     )
     response_polisher = ResponsePolisher(
         plan_query,
+        structured_client=structured_client,
         enabled=os.getenv(
             "RESPONSE_POLISH_ENABLED",
             "true",
@@ -237,43 +252,35 @@ async def _runtime_components(app: FastAPI):
         timeout_s=float(os.getenv("RESPONSE_POLISH_TIMEOUT_S", "3")),
     )
 
-    mcp_env = {**os.environ, "PYTHONPATH": _ROOT}
-    _mcp_client = MCPClientManager({
-        namespace: MCPClient(
-            command=sys.executable,
-            args=["-m", module],
-            env=mcp_env,
-        )
-        for namespace, module in {
-            "commerce": "mcp_server.commerce_server",
-            "fulfillment": "mcp_server.fulfillment_server",
-            "after_sales": "mcp_server.after_sales_server",
-            "knowledge": "mcp_server.knowledge_server",
-        }.items()
-    })
-    await _mcp_client.connect()
-    write_tools = {
-        "create_refund",
-        "create_return",
-        "cancel_order",
-        "create_ticket",
-    }
-    for namespace, client in _mcp_client.clients.items():
-        for adapter in await MCPToolAdapter.discover(
-            client,
-            namespace=namespace,
-            write_tools=(
-                write_tools if namespace == "after_sales" else set()
-            ),
-        ):
-            registry.register(adapter)
+    action_repository = RedisActionExecutionRepository(
+        redis_client,
+        ttl_s=int(os.getenv("ACTION_IDEMPOTENCY_TTL_S", "86400")),
+    )
+    register_internal_rpc_tools(
+        registry,
+        build_mock_rpc_clients(),
+        action_repository,
+    )
+    register_rag_tool(
+        registry,
+        _knowledge_runtime.retriever,
+        tool_name=canonical_tool_name("rag_search"),
+    )
 
     router = Router()
     domain_runtime = DomainAgentRuntime(router, {
-        "knowledge": KnowledgeAgent(registry, query_planner),
+        "knowledge": KnowledgeAgent(
+            registry,
+            query_planner,
+            answer_generator,
+        ),
         "order": OrderAgent(registry, planner=react_planner),
         "logistics": LogisticsAgent(registry, planner=react_planner),
-        "after_sales": AfterSalesAgent(registry, planner=react_planner),
+        "after_sales": AfterSalesAgent(
+            registry,
+            planner=react_planner,
+            skill_manager=_skill_manager,
+        ),
     })
 
     async def validate_recovered_slot(slot_name: str, value: str) -> bool:
@@ -357,10 +364,8 @@ async def _runtime_components(app: FastAPI):
 
 async def _shutdown_components() -> None:
     """Best-effort cleanup for normal shutdown and partial startup failures."""
-    await _drain_background_tasks()
     resources = (
         ("monitor", _monitor, "stop"),
-        ("mcp_client", _mcp_client, "close"),
         ("memory", _memory, "close"),
     )
     for name, resource, method_name in resources:
@@ -440,8 +445,8 @@ async def health():
         "customer_runtime": _customer_runtime is not None,
         "tool_registry": _tool_registry is not None,
         "memory": _memory is not None,
-        "mcp_client": _mcp_client is not None,
         "knowledge_runtime": _knowledge_runtime is not None,
+        "conversation_locks": _conversation_locks is not None,
     }
     missing = [name for name, ready in components.items() if not ready]
     if missing:
@@ -460,36 +465,26 @@ async def health():
 @app.get(
     "/mcp/tools",
     response_model=MCPToolListResponse,
-    tags=["MCP"],
+    tags=["Internal Tools"],
+    deprecated=True,
+)
+@app.get(
+    "/tools",
+    response_model=MCPToolListResponse,
+    tags=["Internal Tools"],
 )
 async def list_mcp_tools() -> MCPToolListResponse:
-    """返回当前 MCP Server 暴露的全部工具定义。"""
-    if _mcp_client is None:
-        raise HTTPException(503, "MCP Client 未初始化")
-    try:
-        discovered = await _mcp_client.list_tools()
-    except Exception as ex:
-        logger.warning("查询 MCP 工具失败: %s", ex)
-        raise HTTPException(503, "MCP Server 不可用") from ex
-
+    """兼容接口：返回内部 RPC ToolRegistry 的全部工具定义。"""
+    if _tool_registry is None:
+        raise HTTPException(503, "Tool Registry 未初始化")
     tools = [
         MCPToolInfo(
-            name=tool.name,
-            title=getattr(tool, "title", None),
-            description=getattr(tool, "description", None) or "",
-            input_schema=getattr(tool, "inputSchema", None) or {},
-            output_schema=getattr(tool, "outputSchema", None),
-            annotations=(
-                tool.annotations.model_dump(
-                    mode="json",
-                    by_alias=True,
-                    exclude_none=True,
-                )
-                if getattr(tool, "annotations", None) is not None
-                else None
-            ),
+            name=spec.name,
+            description=spec.description,
+            input_schema=spec.input_schema,
+            output_schema=spec.output_schema,
         )
-        for tool in discovered
+        for spec in _tool_registry.list_tools()
     ]
     return MCPToolListResponse(total=len(tools), tools=tools)
 
@@ -522,22 +517,31 @@ async def chat(req: ChatRequest):
     if _customer_runtime is None or _memory is None:
         raise HTTPException(503, "服务未就绪")
 
+    conv_id = req.conv_id or str(uuid.uuid4())
+    if _conversation_locks is None:
+        return await _chat_locked(req, conv_id)
+    try:
+        async with _conversation_locks.lock(req.user_id, conv_id):
+            return await _chat_locked(req, conv_id)
+    except ConversationLockTimeout as ex:
+        raise HTTPException(
+            409,
+            "当前会话仍在处理上一条消息，请稍后重试。",
+        ) from ex
+
+
+async def _chat_locked(req: ChatRequest, conv_id: str) -> ChatResponse:
+    """Execute one complete chat turn while the conversation lock is held."""
     from memory.conversation_memory import EpisodicEventType, MsgRole
 
-    conv_id = req.conv_id or str(uuid.uuid4())
     mem_ctx = await _memory.get_context(req.user_id, conv_id, query=req.message)
     history = [
         {"role": m.role.value, "content": m.content}
         for m in mem_ctx.recent_messages[-5:]
     ] if mem_ctx.recent_messages else None
-    skill_prompt = (
-        _skill_manager.prompt_for(req.message)
-        if _skill_manager is not None
-        else ""
-    )
     to_prompt_text = getattr(mem_ctx, "to_prompt_text", None)
     agent_context = (
-        to_prompt_text(skill_prompt=skill_prompt)
+        to_prompt_text()
         if to_prompt_text is not None
         else ""
     )
@@ -557,19 +561,19 @@ async def chat(req: ChatRequest):
     if update_profile is not None:
         await update_profile(req.user_id, conv_id)
     if result.status == "completed":
-        _spawn_background_task(_memory.record_episodic_event(
+        await _memory.record_episodic_event(
             req.user_id,
             conv_id,
             EpisodicEventType.TASK_COMPLETED,
             metadata={"intent": result.intent, "trace_id": result.trace_id},
-        ), name=f"episodic:{conv_id}:completed")
+        )
     elif result.escalated:
-        _spawn_background_task(_memory.record_episodic_event(
+        await _memory.record_episodic_event(
             req.user_id,
             conv_id,
             EpisodicEventType.HANDOFF,
             metadata={"intent": result.intent, "trace_id": result.trace_id},
-        ), name=f"episodic:{conv_id}:handoff")
+        )
 
     return ChatResponse(
         conv_id=conv_id,
@@ -737,10 +741,18 @@ async def add_knowledge(body: BatchDocInput):
             "metadata": metadata,
         })
     try:
-        count = _knowledge_runtime.add_documents(documents)
+        count = await asyncio.to_thread(
+            _knowledge_runtime.add_documents,
+            documents,
+        )
     except ValueError as ex:
         raise HTTPException(400, str(ex)) from ex
-    return {"message": f"成功导入 {count} 个文档片段", "added_chunks": count, "total_chunks": kb.doc_count}
+    total = await asyncio.to_thread(lambda: kb.doc_count)
+    return {
+        "message": f"成功导入 {count} 个文档片段",
+        "added_chunks": count,
+        "total_chunks": total,
+    }
 
 
 @app.post("/knowledge/upload", tags=["知识库"])
@@ -773,16 +785,24 @@ async def upload_knowledge(file: UploadFile = File(...)):
                 raise HTTPException(400, "JSON 文件应为数组格式: [{title, content}, ...]")
         except _json.JSONDecodeError as e:
             raise HTTPException(400, f"JSON 解析失败: {e}")
-        count = _knowledge_runtime.add_documents(docs)
+        count = await asyncio.to_thread(
+            _knowledge_runtime.add_documents,
+            docs,
+        )
     else:
         try:
-            count = _knowledge_runtime.add_file(filename, content)
+            count = await asyncio.to_thread(
+                _knowledge_runtime.add_file,
+                filename,
+                content,
+            )
         except ValueError as ex:
             raise HTTPException(400, str(ex)) from ex
+    total = await asyncio.to_thread(lambda: kb.doc_count)
     return {
         "message": f"文件 {filename} 导入成功",
         "added_chunks": count,
-        "total_chunks": kb.doc_count,
+        "total_chunks": total,
     }
 
 
@@ -792,7 +812,9 @@ async def knowledge_stats():
     if _knowledge_runtime is None:
         raise HTTPException(503, "知识库未初始化")
     kb = _knowledge_runtime.knowledge_base
-    return {"total_chunks": kb.doc_count}
+    return {
+        "total_chunks": await asyncio.to_thread(lambda: kb.doc_count),
+    }
 
 
 @app.get(
@@ -802,11 +824,13 @@ async def knowledge_stats():
 async def list_knowledge_versions(knowledge_id: str):
     if _knowledge_runtime is None:
         raise HTTPException(503, "知识库未初始化")
+    versions = await asyncio.to_thread(
+        _knowledge_runtime.knowledge_base.list_versions,
+        knowledge_id,
+    )
     return {
         "knowledge_id": knowledge_id,
-        "versions": _knowledge_runtime.knowledge_base.list_versions(
-            knowledge_id,
-        ),
+        "versions": versions,
     }
 
 
@@ -823,13 +847,14 @@ async def publish_knowledge_version(
         raise HTTPException(503, "知识库未初始化")
     payload = body or PublishVersionInput()
     try:
-        result = _knowledge_runtime.knowledge_base.publish_version(
+        result = await asyncio.to_thread(
+            _knowledge_runtime.knowledge_base.publish_version,
             knowledge_id,
             version,
             effective_at=payload.effective_at,
             expires_at=payload.expires_at,
         )
-        _knowledge_runtime.refresh()
+        await asyncio.to_thread(_knowledge_runtime.refresh)
         return result
     except KeyError as ex:
         raise HTTPException(404, str(ex)) from ex
@@ -848,11 +873,12 @@ async def revoke_knowledge_version(
     if _knowledge_runtime is None:
         raise HTTPException(503, "知识库未初始化")
     try:
-        result = _knowledge_runtime.knowledge_base.revoke_version(
+        result = await asyncio.to_thread(
+            _knowledge_runtime.knowledge_base.revoke_version,
             knowledge_id,
             version,
         )
-        _knowledge_runtime.refresh()
+        await asyncio.to_thread(_knowledge_runtime.refresh)
         return result
     except KeyError as ex:
         raise HTTPException(404, str(ex)) from ex

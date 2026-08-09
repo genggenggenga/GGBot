@@ -115,8 +115,7 @@ class LLMJudge:
                 messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
-            s, e = raw.find("{"), raw.rfind("}") + 1
-            data = json.loads(raw[s:e])
+            data = json.loads(raw)
             return QualityScores(
                 relevance=float(data.get("relevance", 0.5)),
                 accuracy=float(data.get("accuracy", 0.5)),

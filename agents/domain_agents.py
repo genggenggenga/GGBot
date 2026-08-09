@@ -23,6 +23,7 @@ from core.prompts.react import (
 from core.react_planner import ReActPlanner
 from core.tool_names import canonical_tool_name, logical_tool_name
 from core.tool_registry import ToolRegistry, ToolType
+from rag.answer_generator import RAGAnswerGenerator
 from rag.query_planner import QueryPlanner
 
 
@@ -223,6 +224,7 @@ class ServiceAgent:
     system_prompt = ""
     allowed_tools: tuple[str, ...] = ()
     react_allowed_tools: tuple[str, ...] = ()
+    deterministic_fallback_intents: Optional[tuple[str, ...]] = None
     completion_condition = ""
 
     def __init__(
@@ -261,6 +263,7 @@ class ServiceAgent:
         context: str = "",
         goal: Optional[str] = None,
         seed_observations: Optional[Sequence[Observation]] = None,
+        skill_context: str = "",
     ) -> AgentResult:
         task_state = (
             state.model_copy(update={"active_intent": goal}, deep=True)
@@ -274,6 +277,7 @@ class ServiceAgent:
                 message,
                 context,
                 observations,
+                skill_context,
             )
         return await self._execute_deterministic(
             task_state,
@@ -330,6 +334,7 @@ class ServiceAgent:
         message: str,
         context: str,
         observations: List[Observation],
+        skill_context: str = "",
     ) -> AgentResult:
         called_actions = set()
         pending = task_state.pending_action
@@ -401,6 +406,7 @@ class ServiceAgent:
                     observations=observations,
                     tools=tool_specs,
                     system_prompt=self.system_prompt,
+                    skill_context=skill_context,
                 )
             except Exception as ex:
                 logger.warning(
@@ -408,6 +414,21 @@ class ServiceAgent:
                     self.name,
                     ex,
                 )
+                if (
+                    self.deterministic_fallback_intents is not None
+                    and task_state.active_intent
+                    not in self.deterministic_fallback_intents
+                ):
+                    return AgentResult(
+                        agent=self.name,
+                        success=True,
+                        response=(
+                            "当前售后自动处理暂不可用，"
+                            "建议转人工客服继续处理。"
+                        ),
+                        observations=observations,
+                        completed=False,
+                    )
                 return await self._execute_deterministic(
                     task_state,
                     message,
@@ -655,6 +676,7 @@ class LogisticsAgent(ServiceAgent):
 class AfterSalesAgent(ServiceAgent):
     name = AFTER_SALES_AGENT
     system_prompt = AFTER_SALES_DOMAIN_POLICY
+    deterministic_fallback_intents = ("refund_request",)
     allowed_tools = (
         "query_order",
         "check_refund_eligibility",
@@ -682,6 +704,16 @@ class AfterSalesAgent(ServiceAgent):
         "request": "当前版本尚未实现该售后操作，请转人工客服继续处理。",
     }
 
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        max_steps: int = 4,
+        planner: Optional[ReActPlanner] = None,
+        skill_manager: Optional[Any] = None,
+    ) -> None:
+        super().__init__(registry, max_steps=max_steps, planner=planner)
+        self._skill_manager = skill_manager
+
     async def execute(
         self,
         state: DialogueState,
@@ -694,6 +726,15 @@ class AfterSalesAgent(ServiceAgent):
             state.model_copy(update={"active_intent": goal}, deep=True)
             if goal
             else state
+        )
+        skill_context = (
+            self._skill_manager.prompt_for(
+                message,
+                agent_type=self.name,
+                intent=task_state.active_intent,
+            )
+            if self._skill_manager is not None
+            else ""
         )
         if task_state.active_intent in {"complaint", "escalation"}:
             return await self._execute_handoff(task_state, message, context)
@@ -726,6 +767,7 @@ class AfterSalesAgent(ServiceAgent):
             message,
             context,
             seed_observations=seed_observations,
+            skill_context=skill_context,
         )
 
     async def _execute_handoff(
@@ -902,9 +944,11 @@ class KnowledgeAgent:
         self,
         registry: ToolRegistry,
         query_planner: Optional[QueryPlanner] = None,
+        answer_generator: Optional[RAGAnswerGenerator] = None,
     ) -> None:
         self._registry = registry
         self._query_planner = query_planner
+        self._answer_generator = answer_generator
         canonical_name = canonical_tool_name("rag_search")
         self._rag_tool = (
             canonical_name
@@ -919,7 +963,7 @@ class KnowledgeAgent:
         if not context:
             return message
         sections = []
-        for label in ("Skills", "会话摘要", "相关历史", "用户画像"):
+        for label in ("会话摘要", "相关历史", "用户画像"):
             marker = f"[{label}]\n"
             start = context.find(marker)
             if start < 0:
@@ -1021,6 +1065,33 @@ class KnowledgeAgent:
                 response=self._temporal_response(comparison),
                 observations=[observation],
                 citations=citations,
+            )
+
+        if self._answer_generator is not None:
+            generated = await self._answer_generator.generate(
+                message,
+                primary_text,
+                [item for item in items if isinstance(item, dict)],
+                [item for item in citations if isinstance(item, dict)],
+            )
+            if generated.generated and not generated.sufficient_evidence:
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response="根据现有资料无法回答该问题。",
+                    observations=[observation],
+                )
+            if generated.sufficient_evidence:
+                return AgentResult(
+                    agent=self.name,
+                    success=True,
+                    response=generated.response,
+                    observations=[observation],
+                    citations=generated.citations,
+                )
+            logger.warning(
+                "RAG answer generation failed, using extractive fallback: %s",
+                generated.fallback_reason,
             )
 
         first = items[0]

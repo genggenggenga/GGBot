@@ -140,6 +140,7 @@ class IntentRecognizer:
         self.cache_hits   = 0
         self.cache_misses = 0
         self._slot_validator: Optional[SlotValidator] = None
+        self._structured_client: Any = None
 
     # ── 公开接口 ──────────────────────────────────────────────────────────────
 
@@ -206,6 +207,10 @@ class IntentRecognizer:
     ) -> None:
         """Set an optional business validator for LLM-recovered slot values."""
         self._slot_validator = validator
+
+    def set_structured_client(self, client: Any) -> None:
+        """Use provider-native structured output for the active NLU path."""
+        self._structured_client = client
 
     # ── 三路识别策略 ──────────────────────────────────────────────────────────
 
@@ -290,6 +295,11 @@ class IntentRecognizer:
                 _llm_fn,
                 current_state,
                 history=history,
+                structured_client=getattr(
+                    self,
+                    "_structured_client",
+                    None,
+                ),
             )
             slots_to_validate = (
                 signaled_slots
@@ -447,8 +457,7 @@ class IntentRecognizer:
                 messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
-            s, e = raw.find("{"), raw.rfind("}") + 1
-            data = json.loads(raw[s:e])
+            data = json.loads(raw)
             try:
                 data["intent"] = IntentCategory(data["intent"])
             except ValueError:
@@ -534,8 +543,7 @@ class IntentRecognizer:
                 messages=[{"role": "user", "content": prompt.user}],
             )
             raw = extract_text_content(resp.content)
-            s, e = raw.find("{"), raw.rfind("}") + 1
-            return json.loads(raw[s:e])
+            return json.loads(raw)
         except Exception:
             return {"order_id": [], "product": [], "date": [], "amount": [], "error_code": []}
 

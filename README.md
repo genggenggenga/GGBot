@@ -1,6 +1,6 @@
 # GGBot
 
-GGBot 是一个用于展示智能客服、Agent 编排与 Hybrid RAG 的技术原型。项目以退款申请为主链路，覆盖结构化 NLU、Dialogue State Tracking、自研 Turn-level 状态机、领域 Agent、标准 MCP、工具确认门禁、引用式 RAG、记忆和离线评测。
+GGBot 是一个用于展示智能客服、Agent 编排与 Hybrid RAG 的技术原型。项目以退款申请为主链路，覆盖结构化 NLU、Dialogue State Tracking、自研 Turn-level 状态机、领域 Agent、内部 RPC Tool、工具确认与共享幂等门禁、引用式 RAG、记忆和离线评测。
 
 ## 核心架构
 
@@ -11,9 +11,9 @@ FastAPI /chat
   -> TurnEngine
   -> Deterministic Router
      -> KnowledgeAgent -> Hybrid RAG
-     -> OrderAgent -> MCP order tools
-     -> LogisticsAgent -> MCP logistics tools
-     -> AfterSalesAgent -> MCP refund tools
+     -> OrderAgent -> Commerce RPC tools
+     -> LogisticsAgent -> Fulfillment RPC tools
+     -> AfterSalesAgent -> Skill + AfterSales RPC tools
   -> Redis State / Memory
   -> Agent Trace
 ```
@@ -53,20 +53,22 @@ curl -s http://localhost:8000/chat \
 
 三轮分别验证缺槽追问、订单与退款资格查询、确认后创建退款。响应保留原有字段，并新增 `trace_id`、`status`、`missing_slots` 和 `citations`。
 
-## MCP Demo
+## 内部 RPC Mock
 
-客服工具由标准 MCP stdio Server 提供：
+主应用不再启动 MCP stdio 子进程。ToolRegistry 通过显式 ToolAdapter
+直接调用可替换的内部 RPC Client；本地默认使用确定性 Mock：
 
 ```bash
-.venv/bin/python -m mcp_server.customer_service_server
-.venv/bin/python -m pytest -q tests/test_mcp_integration.py
+.venv/bin/python -m pytest -q tests/test_internal_rpc_and_structured.py
+curl -s http://localhost:8000/tools
 ```
 
-Server 提供 `query_order`、`track_package`、`check_refund_eligibility`、`create_refund` 和 `create_ticket`。Mock 数据仅用于可重复演示，不依赖真实电商后台。
+RPC Client 提供订单、物流、售后和工单操作。写操作通过 Redis
+`action_id` 幂等仓库跨实例去重；Mock 数据仅用于可重复演示。
 
 ## RAG 与评测
 
-RAG 链路由 ChromaDB Dense、独立 BM25、RRF、Cross-Encoder Reranker 和 Citation 组成。50 条固定评测样本位于 `data/eval/customer_agent_cases.json`。
+RAG 链路由 ChromaDB Dense、独立 BM25、RRF、Cross-Encoder Reranker、受约束 Top-N 证据生成和 Citation 校验组成。50 条固定评测样本位于 `data/eval/customer_agent_cases.json`。
 
 文档切片按模型无关 token 预算执行，默认每个 chunk 最多 500 tokens、相邻 chunk 重叠 80 tokens。可通过环境变量调整：
 
@@ -76,6 +78,10 @@ export RAG_CHUNK_OVERLAP_TOKENS=80
 export RAG_MULTI_QUERY_ENABLED=true
 export RAG_MULTI_QUERY_MAX_QUERIES=3
 export RAG_QUERY_REWRITE_MIN_CONFIDENCE=0.5
+export RAG_GENERATION_ENABLED=true
+export RAG_ANSWER_MAX_CHUNKS=5
+export RAG_ANSWER_MAX_CONTEXT_TOKENS=1800
+export RAG_ANSWER_TIMEOUT_S=8
 ```
 
 修改参数只影响新导入或重新索引的文档。Chunking 黄金评测集位于 `data/eval/rag_chunking_cases.json`，实际执行文档解析、切片和 BM25 检索：
@@ -92,6 +98,8 @@ curl -s http://localhost:8000/traces/<trace_id>
 ```
 
 KnowledgeAgent 会在一次结构化 LLM 调用中完成指代消解与 Multi-Query 改写，保留原始问题，并将最多 3 条查询分别执行 Dense/BM25 召回；候选跨查询 RRF 融合后只执行一次 Reranker。模型调用失败、置信度不足或修改了错误码/数字等硬实体时，自动回退原问题。
+
+重排后的 Top-N 证据会按 chunk 和正文去重，并受统一 Token 预算约束。AnswerGenerator 只能基于编号证据生成回答，每个事实段必须携带合法引用；新增数字、期限、金额、ID 或错误码会被本地校验拒绝。模型明确判断证据不足时返回拒答；生成超时、非法 JSON 或校验失败时降级为原有 Top-1 抽取式回答。
 
 知识导入支持版本和生效区间：
 

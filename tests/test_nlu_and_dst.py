@@ -446,11 +446,11 @@ class TestParseLlmJson:
 
     def test_json_with_surrounding_text(self):
         data = _parse_llm_json('Here is the result:\n{"intent":"query","confidence":0.8}\nDone')
-        assert data == {"intent": "query", "confidence": 0.8}
+        assert data is None
 
     def test_markdown_fenced(self):
         data = _parse_llm_json('```json\n{"intent":"other","confidence":0.5}\n```')
-        assert data == {"intent": "other", "confidence": 0.5}
+        assert data is None
 
     def test_invalid_json(self):
         assert _parse_llm_json("not json at all") is None

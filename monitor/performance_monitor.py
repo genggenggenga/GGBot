@@ -6,15 +6,12 @@
 本模块的答案：
   1. 实时采集 —— 每隔 N 秒从 Orchestrator 和 ToolManager 拉取最新统计
   2. 异常检测 —— Z-score 统计方法，自动发现指标突变
-  3. 路由反馈 —— 将 Agent 成功率/延迟写回 Orchestrator，
-     Orchestrator 的 _best_agent() 会据此动态调整路由权重
-  4. 优化建议 —— 基于规则生成可操作的优化建议（不是空话）
-  5. 告警 —— 超阈值时打日志 + 可选 Webhook
+  3. 优化建议 —— 基于规则生成可操作的优化建议（不是空话）
+  4. 告警 —— 超阈值时打日志 + 可选 Webhook
 """
 import asyncio
 import logging
 import statistics
-import time
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -99,16 +96,7 @@ class AnomalyDetector:
 # ── 性能监控器 ────────────────────────────────────────────────────────────────
 
 class PerformanceMonitor:
-    """
-    Agent 在线表现监控。
-
-    与 Orchestrator 的联动：
-      Monitor 采集 → 发现某 Agent 成功率下降 →
-      Orchestrator.get_stats() 中该 Agent 的 routing_score 自动降低 →
-      _best_agent() 路由时自动绕开该 Agent
-
-    这就是"利用 Monitor 监控在线表现"的闭环。
-    """
+    """Agent 在线表现监控，不参与运行时路由决策。"""
 
     # 告警阈值
     THRESHOLDS = {
@@ -206,7 +194,6 @@ class PerformanceMonitor:
         """
         agent_stats = self._agent_source.get_stats()
         tool_stats  = self._tool_source.get_stats()
-        routing_penalties: Dict[str, float] = {}
 
         # ── Agent 指标 ────────────────────────────────────────────────────────
         for agent_key, s in agent_stats.items():
@@ -227,8 +214,6 @@ class PerformanceMonitor:
             if "agent_success_rate" in self._prom:
                 self._prom["agent_success_rate"].labels(agent=agent_key).set(sr)
                 self._prom["agent_avg_latency_ms"].labels(agent=agent_key).set(ms)
-
-            routing_penalties[agent_key] = self._routing_penalty(sr, ms)
 
         # ── 工具指标 ──────────────────────────────────────────────────────────
         for tool_name, s in tool_stats.items():
@@ -261,21 +246,6 @@ class PerformanceMonitor:
                 total_requests - self._last_request_total,
             )
         self._last_request_total = total_requests
-
-        updater = getattr(self._agent_source, "update_routing_penalties", None)
-        if updater:
-            updater(routing_penalties)
-        self._generate_routing_suggestions(agent_stats)
-
-    @staticmethod
-    def _routing_penalty(success_rate: float, avg_ms: float) -> float:
-        """把在线表现转成 0-0.9 的路由降权系数。"""
-        penalty = 0.0
-        if success_rate < 0.90:
-            penalty += min(0.5, (0.90 - success_rate) * 2)
-        if avg_ms > 3000:
-            penalty += min(0.4, (avg_ms - 3000) / 10000)
-        return min(penalty, 0.9)
 
     def _check_threshold(self, metric: str, value: float, label: str) -> None:
         if metric not in self.THRESHOLDS:
@@ -318,25 +288,6 @@ class PerformanceMonitor:
                 task.add_done_callback(self._webhook_tasks.discard)
         elif existing is not None:
             existing.resolved = True
-
-    def _generate_routing_suggestions(self, agent_stats: Dict[str, Any]) -> None:
-        """
-        基于 Agent 在线表现生成路由优化建议。
-        这是 Monitor → Orchestrator 反馈闭环的体现。
-        """
-        for agent_key, s in agent_stats.items():
-            if s["success_rate"] < 0.85 and s["total"] > 10:
-                self._add_suggestion(Suggestion(
-                    title=f"Agent {agent_key} 成功率偏低",
-                    detail=f"成功率 {s['success_rate']:.1%}，路由评分 {s['routing_score']:.3f}",
-                    action=(
-                        "Orchestrator 的 _best_agent() 已自动降低该 Agent 的路由权重。\n"
-                        "建议：1. 检查 system_prompt 是否需要优化\n"
-                        "      2. 检查该类型问题的复杂度是否超出 Agent 能力\n"
-                        "      3. 考虑增加同类型 Agent 实例"
-                    ),
-                    priority=8,
-                ))
 
     def _add_suggestion(self, s: Suggestion) -> None:
         # 去重：相同 title 不重复添加

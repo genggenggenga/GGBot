@@ -254,3 +254,43 @@ async def test_react_planner_failure_uses_deterministic_fallback():
     assert result.success
     assert result.observations[0].name == "query_order"
     assert "paid" in result.response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["return_request", "cancel_order"])
+async def test_after_sales_planner_failure_never_falls_back_to_refund(intent):
+    registry = ToolRegistry()
+    tool_calls = []
+
+    async def record_call(params, context):
+        del context
+        tool_calls.append(params)
+        return {"found": True, **params}
+
+    register_tool(
+        registry,
+        "query_order",
+        record_call,
+        required=("order_id",),
+    )
+    register_tool(
+        registry,
+        "check_refund_eligibility",
+        record_call,
+        required=("order_id",),
+    )
+    planner = SequencePlanner(RuntimeError("LLM unavailable"))
+
+    result = await AfterSalesAgent(registry, planner=planner).execute(
+        DialogueState(
+            active_intent=intent,
+            slots={"order_id": "ORD-1"},
+        ),
+    )
+
+    assert result.success
+    assert result.completed is False
+    assert result.pending_action is None
+    assert result.observations == []
+    assert "转人工" in result.response
+    assert tool_calls == []

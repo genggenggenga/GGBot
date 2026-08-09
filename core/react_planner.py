@@ -16,8 +16,15 @@ LLMCall = Callable[[PromptSpec], Awaitable[str]]
 class ReActPlanner:
     """Ask an LLM for one structured action at a time."""
 
-    def __init__(self, llm_call: LLMCall, *, max_observation_chars: int = 2400):
+    def __init__(
+        self,
+        llm_call: LLMCall,
+        *,
+        structured_client: Any = None,
+        max_observation_chars: int = 2400,
+    ):
         self._llm_call = llm_call
+        self._structured_client = structured_client
         self._max_observation_chars = max_observation_chars
 
     async def decide(
@@ -30,8 +37,9 @@ class ReActPlanner:
         observations: Sequence[Observation],
         tools: Sequence[ToolSpec],
         system_prompt: str = "",
+        skill_context: str = "",
     ) -> AgentDecision:
-        raw = await self._llm_call(self._build_prompt(
+        prompt = self._build_prompt(
             agent_name=agent_name,
             goal=goal,
             message=message,
@@ -39,7 +47,17 @@ class ReActPlanner:
             observations=observations,
             tools=tools,
             system_prompt=system_prompt,
-        ))
+            skill_context=skill_context,
+        )
+        if self._structured_client is not None:
+            return await self._structured_client.generate(
+                prompt,
+                AgentDecision,
+                tool_name="submit_agent_decision",
+                max_tokens=512,
+                temperature=0.0,
+            )
+        raw = await self._llm_call(prompt)
         return AgentDecision.model_validate(self._parse_json(raw))
 
     def _build_prompt(
@@ -52,6 +70,7 @@ class ReActPlanner:
         observations: Sequence[Observation],
         tools: Sequence[ToolSpec],
         system_prompt: str,
+        skill_context: str,
     ) -> PromptSpec:
         tool_contracts = [
             {
@@ -82,9 +101,14 @@ class ReActPlanner:
             "confirmation_status": state.confirmation_status.value,
             "completed_goals": state.completed_goals,
         }
+        domain_policy = system_prompt
+        if skill_context:
+            domain_policy = (
+                f"{system_prompt}\n\n[售后 Skill 软策略]\n{skill_context}"
+            )
         return build_react_prompt(
             agent_name=agent_name,
-            domain_policy=system_prompt,
+            domain_policy=domain_policy,
             goal=goal,
             message=message,
             state=state_data,
@@ -95,11 +119,7 @@ class ReActPlanner:
     @staticmethod
     def _parse_json(raw: str) -> Dict[str, Any]:
         text = str(raw).strip()
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start < 0 or end <= start:
-            raise ValueError("ReAct planner output is not JSON")
-        data = json.loads(text[start:end])
+        data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("ReAct planner output must be an object")
         return data

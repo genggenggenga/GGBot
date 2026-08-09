@@ -9,12 +9,25 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from core.agent_models import INTENT_SCHEMAS, UnderstandingResult, UserAct
 from core.nlu_fast_track import fast_track_extract
 from core.prompts.nlu import build_prompt as build_nlu_prompt
 from core.prompts.types import PromptSpec
 
 logger = logging.getLogger(__name__)
+
+
+class _NLUOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent: str
+    intents: List[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    slots: Dict[str, Any] = Field(default_factory=dict)
+    corrected_slots: List[str] = Field(default_factory=list)
+    user_act: str = "inform"
 
 
 def _build_prompt(
@@ -47,20 +60,11 @@ def _build_prompt_spec(
 
 
 def _parse_llm_json(raw: str) -> Optional[Dict[str, Any]]:
-    """Extract and parse JSON from LLM output text."""
-    # Strip markdown fences if present
+    """Parse a strict JSON object from a test or legacy adapter."""
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines)
-
-    s = text.find("{")
-    e = text.rfind("}") + 1
-    if s < 0 or e <= s:
-        return None
     try:
-        return json.loads(text[s:e])
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
         return None
 
@@ -179,6 +183,7 @@ async def understand_with_llm(
     llm_call_fn: Any,
     current_state: Optional[Dict[str, Any]] = None,
     history: Optional[List[Dict[str, str]]] = None,
+    structured_client: Any = None,
 ) -> UnderstandingResult:
     """Call LLM once for structured intent + slot extraction.
 
@@ -195,15 +200,25 @@ async def understand_with_llm(
     prompt = _build_prompt_spec(text, current_state, history)
 
     try:
-        raw = await llm_call_fn(prompt)
-        if not isinstance(raw, str) or not raw.strip():
-            logger.warning("LLM returned empty output, degrading")
-            return make_fallback_understanding(text, current_state)
+        if structured_client is not None:
+            output = await structured_client.generate(
+                prompt,
+                _NLUOutput,
+                tool_name="submit_understanding",
+                max_tokens=512,
+                temperature=0.1,
+            )
+            data = output.model_dump()
+        else:
+            raw = await llm_call_fn(prompt)
+            if not isinstance(raw, str) or not raw.strip():
+                logger.warning("LLM returned empty output, degrading")
+                return make_fallback_understanding(text, current_state)
 
-        data = _parse_llm_json(raw)
-        if data is None:
-            logger.warning("LLM output is not valid JSON, degrading")
-            return make_fallback_understanding(text, current_state)
+            data = _parse_llm_json(raw)
+            if data is None:
+                logger.warning("LLM output is not valid JSON, degrading")
+                return make_fallback_understanding(text, current_state)
 
         result = _validate_llm_output(data)
         if result is None:

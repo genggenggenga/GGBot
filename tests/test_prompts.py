@@ -11,6 +11,7 @@ from core.prompts.legacy import (
 from core.prompts.memory import build_profile_prompt, build_summary_prompt
 from core.prompts.nlu import build_prompt as build_nlu_prompt
 from core.prompts.rag import (
+    build_answer_generation_prompt,
     build_query_planner_prompt,
     build_query_rewrite_prompt,
     build_rerank_prompt,
@@ -82,6 +83,24 @@ def test_rag_prompts_forbid_answering_and_preserve_identifiers():
     assert "不得回答问题" in rewrite.system
     assert "不得回答用户问题" in rerank.system
     assert "生效时间" in rerank.system
+
+
+def test_rag_answer_prompt_requires_grounded_citations_and_refusal():
+    prompt = build_answer_generation_prompt(
+        "退款多久到账",
+        "退款到账时间",
+        [{
+            "citation_id": "[1]",
+            "content": "退款审核通过后五个工作日内到账。",
+        }],
+    )
+
+    assert "只能根据输入中的 evidence" in prompt.system
+    assert "每个包含事实结论的段落" in prompt.system
+    assert "sufficient_evidence" in prompt.system
+    payload = json.loads(prompt.user.split("\n", 1)[1])
+    assert payload["current_user_question"] == "退款多久到账"
+    assert payload["evidence"][0]["citation_id"] == "[1]"
 
 
 def test_memory_prompts_exclude_transient_and_sensitive_facts():

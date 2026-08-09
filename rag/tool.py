@@ -19,6 +19,7 @@ def register_rag_tool(
     retriever: HybridRetriever,
     *,
     agent_names: Optional[Iterable[str]] = None,
+    tool_name: str = "rag_search",
 ) -> None:
     async def search_handler(params, context):
         del context
@@ -29,7 +30,7 @@ def register_rag_tool(
         )
 
     spec = ToolSpec(
-        name="rag_search",
+        name=tool_name,
         description="Hybrid knowledge search with citations",
         input_schema={
             "type": "object",

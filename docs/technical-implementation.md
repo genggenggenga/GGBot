@@ -1,13 +1,13 @@
 # GGBot 当前版本技术实现
 
-> Turn-level Agent Runtime · Standard MCP · Hybrid RAG · Persistent Memory
+> Turn-level Agent Runtime · Internal RPC Tools · Hybrid RAG · Persistent Memory
 >
 > 技术说明与[飞书更新副本](https://bytedance.sg.larkoffice.com/docx/KsZ7dMeVUotli3xg2AilbhaCgeg) revision 17 对齐；原文档保持不变，本次审计源为原文 revision 54。
 
 | 项目     | 内容                      | 项目     | 内容                              |
 | -------- | ------------------------- | -------- | --------------------------------- |
 | 当前版本 | `feat-v1 / 7d7397a`          | 核心场景 | 退款申请与人工工单确认闭环        |
-| 验证结果 | 277 passed · 1 warning       | 技术主线 | 显式状态机 + 多 Agent + MCP + RAG |
+| 验证结果 | 381 passed · 1 warning       | 技术主线 | 显式状态机 + 多 Agent + RPC + RAG |
 
 > **项目定位**
 >
@@ -20,7 +20,7 @@
 | 对话编排    | 自研 TurnEngine，显式状态迁移、暂停与跨轮恢复          | 主链路已落地   |
 | 对话理解    | 规则 fast-track + 单次结构化 LLM + 安全降级            | 主链路已落地   |
 | Multi-Agent | Knowledge、Order、Logistics、AfterSales 四类领域 Agent | 确定性路由     |
-| 工具协议    | 官方 MCP SDK、stdio Server、动态工具发现               | 可运行 Demo    |
+| 工具协议    | 显式 ToolSpec + 可替换内部 RPC Client                  | 主链路已落地   |
 | 知识检索    | Chroma Dense + BM25 + RRF + Cross-Encoder              | 效果待继续验证 |
 | 记忆系统    | Redis 工作记忆与状态，Chroma 情景记忆与画像            | 分层存储       |
 | 质量体系    | Trace、Prometheus、277 个测试、50 条离线评测           | 主链路监控已接入 |
@@ -32,9 +32,9 @@
 | 业务动作安全 | 退货/取消等未实现动作 fail closed；订单、物流、退款和工单使用强类型业务输出 | 补充能力边界、业务失败与系统失败的区别 |
 | 售后闭环 | 投诉与转人工通过 `create_ticket` 进入确认、恢复和幂等链路 | Multi-Agent 图增加退款/工单双分支 |
 | 复合意图 | NLU 输出 `intents`，Runtime 按 Agent 分组 goal，并执行 completion condition | 更新 NLU、Router 和结果合并说明 |
-| MCP 韧性 | MCP Adapter 已接入参数校验、超时、熔断和调用统计；WRITE 成功后清理确认状态 | 移除“MCP Adapter 未接监控”的旧结论 |
+| RPC 与幂等 | RPC Adapter 接入参数校验、超时、熔断和统计；Redis 共享 action_id 幂等 | 移除进程内写结果缓存 |
 | RAG 一致性 | Chroma collection 成为 canonical chunk store，保留完整引用元数据；Dense/RRF/Reranker 使用独立阈值 | 重绘索引与证据门控图 |
-| 异步与可观测性 | 同步 Redis/Chroma/Retriever 调用移出事件循环；后台任务受跟踪并在关停时 drain | 补充 off-loop、任务生命周期和主链路监控 |
+| 异步与可观测性 | Redis 使用异步客户端；Chroma/Retriever 调用移出事件循环；情景记忆在会话锁内完成 | 补充会话事务边界和主链路监控 |
 
 ### 系统架构
 
@@ -46,7 +46,7 @@
 
 ### 启动装配与模块边界
 
-应用通过 FastAPI lifespan 统一完成运行时装配。启动阶段先读取模型配置和业务 Skills，再建立 Redis 与 ChromaDB 连接；随后构建 KnowledgeRuntime、ToolRegistry 和标准 MCP Client，最后把 Router、领域 Agent、TurnEngine、TraceStore 组装成 CustomerAgentRuntime。MCP Server 连接、监控任务启动或模型初始化失败时，应用不会进入可服务状态，避免请求落到半初始化对象。
+应用通过 FastAPI lifespan 统一完成运行时装配。启动阶段先读取模型配置和售后 Skill，再建立异步 Redis 与 ChromaDB 连接；随后构建 KnowledgeRuntime、ToolRegistry、内部 RPC Client 和 Redis 幂等仓库，最后把 Router、领域 Agent、TurnEngine、TraceStore 组装成 CustomerAgentRuntime。关键依赖初始化失败时，应用不会进入可服务状态。
 
 **API 层只负责协议与生命周期。** `api/main.py` 处理请求模型、组件初始化、上下文读取和响应序列化，不承载退款判断等业务决策。核心编排集中在 `core/customer_agent_runtime.py`，状态迁移集中在 `core/turn_engine.py`，领域动作集中在 `agents/domain_agents.py`，工具治理集中在 `core/tool_registry.py`。
 
@@ -58,7 +58,7 @@
 | 理解层 | `IntentRecognizer`<br>`DialogueStateTracker` | 把自然语言变成结构化理解，并归并为可持久化业务状态     |
 | 编排层 | `CustomerAgentRuntime`<br>`TurnEngine`       | 注册状态 handler、执行有界状态循环、处理暂停与失败     |
 | 领域层 | `Router`<br>`DomainAgentRuntime`             | 确定性路由，执行一个或多个领域子任务并合并结果         |
-| 能力层 | `ToolRegistry`<br>`MCPToolAdapter`           | 工具发现、白名单、参数校验、确认门禁和统一结果模型     |
+| 能力层 | `ToolRegistry`<br>`LocalToolAdapter`<br>`InternalRPCClients` | 工具注册、白名单、参数校验、确认门禁和 RPC 调用 |
 | 数据层 | Redis / ChromaDB                             | 保存 DialogueState、工作记忆、情景记忆、画像和知识索引 |
 
 ## 2. 一次请求如何执行
@@ -117,7 +117,7 @@ while state not in terminal_states:
 
 **第三轮恢复待执行动作。** 用户说“确认”时，NLU 识别 UserAct.CONFIRM，DST 把 confirmation_status 从 PENDING 更新为 CONFIRMED。TurnEngine 由 `resume_state()` 推导从 ACTING 恢复。AfterSalesAgent 使用原 PendingAction 的 action_id 调用 `confirm_action()`，随后 ToolRegistry 才放行 WRITE 工具。
 
-**幂等键贯穿状态与工具。** action_id 同时存在于 PendingAction、ToolRegistry 确认门禁和 MCP Server 写入缓存中。相同 action_id 只有 payload 指纹一致时才作为重放返回；payload 不同会返回 `idempotency_conflict`。当前幂等表仍为进程内 Mock，持久化需要真实数据库环境。
+**幂等键贯穿状态与工具。** action_id 同时存在于 PendingAction、ToolRegistry 确认门禁、内部 RPC 请求和 Redis ActionExecutionRepository 中。相同 action_id 只有 payload 指纹一致时才返回持久化结果；payload 不同返回 `idempotency_conflict`。真实业务 RPC 仍应使用数据库唯一键提供最终幂等保证。
 
 **拒绝和失败都有显式语义。** 拒绝会清空 pending_action 并返回取消文案，不会触达写工具；订单不存在或超出退款窗口属于业务完成结果；工具超时、参数错误或 handler 异常才进入 FAILED，并生成可交给人工的 HandoffPackage。
 
@@ -173,39 +173,39 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **动作规划是领域代码，不是隐藏推理。** OrderAgent 固定执行一次 query_order；LogisticsAgent 先验证订单，再查询 track_package；AfterSalesAgent 先查订单、再核验资格、最后生成 PendingAction。工具选择与终止条件都可以直接通过单元测试验证，不依赖不可观察的 Chain-of-Thought。
 
-**KnowledgeAgent 单独设计。** 知识问答不需要多步业务动作，因此只调用一次 `rag_search(mode="rerank")`。返回无证据或 answered=false 时明确拒答；有证据时使用首个 chunk 生成响应并附带 Citation。它不进入 ServiceAgent 循环，从架构上限制 FAQ 工具调用成本。
+**KnowledgeAgent 单独设计。** 知识问答不需要多步业务动作，因此只调用一次 `rag_search(mode="rerank")`。返回无证据或 answered=false 时明确拒答；有证据时将重排后的 Top-N chunk 去重并纳入统一 Token 预算，再由受约束 AnswerGenerator 综合生成带引用回答。生成超时、输出非法或本地校验失败时降级为首个 chunk 的抽取式响应。它不进入 ServiceAgent 循环，从架构上限制 FAQ 工具调用成本。
 
 **售后动作按能力显式分流。** `refund_request` 进入退款资格与确认链路；`complaint` / `escalation` 生成 `create_ticket` PendingAction，并在确认后创建人工工单；退货、取消订单等尚未实现的动作直接 fail closed，不会复用退款工具。
 
 **DomainAgentRuntime 已接入复合任务。** Router 将每个 goal 映射到 Agent，再按 Agent 分组去重；多个 Agent 按确定性顺序执行。`GoalCompletionEvaluator` 根据 IntentSchema 的 completion condition 检查引用、工具 Observation 或工单结果，只有满足完成谓词的 goal 才进入 `completed_goals`，最后由 ResponseComposer 合并响应。
 
-### 4.3 MCP 与工具安全边界
+### 4.3 内部 RPC 与工具安全边界
 
-**图解阅读方式。** 从 Agent 请求开始，依次核对 ToolRegistry 的四道安全检查、MCP 的发现与调用协议，以及 Server 对写操作的幂等保护；红色支路表示调用在产生副作用前被拒绝。
+**图解阅读方式。** 从 Agent 请求开始，依次核对 ToolRegistry 的工具白名单、读写分类、确认门禁，以及 Redis 对写 RPC 的幂等保护；红色支路表示调用在产生副作用前被拒绝。
 
-![MCP 与工具安全边界](../diagrams/2026-08-07T100004/diagram.png)
+![工具安全边界](../diagrams/2026-08-07T100004/diagram.png)
 
-应用通过官方 `mcp` Python SDK 以 stdio 启动 `mcp_server.customer_service_server`，完成 initialize、list_tools 和动态注册。MCPToolAdapter 将服务端定义转换为统一 ToolSpec / ToolResult。
+主应用不启动工具子进程。`register_internal_rpc_tools()` 显式注册领域 ToolSpec，LocalToolAdapter 把工具参数转换为 CommerceRPC、FulfillmentRPC 和 AfterSalesRPC 调用。Mock Client 与未来真实 HTTP/Thrift/gRPC Client 实现同一 Protocol。
 
 | 执行约束     | 行为                                                       |
 | ------------ | ---------------------------------------------------------- |
 | Agent 白名单 | 每个 Agent 只能调用明确授权的工具                          |
 | 读写分类     | `create_refund` 和 `create_ticket` 被标记为 WRITE          |
 | 确认门禁     | WRITE 工具必须携带已确认的 action_id，否则直接拒绝执行     |
-| 幂等保护     | MCP Server 按 action_id 缓存写入结果，重放不会重复创建     |
-| 韧性策略     | Local Adapter 支持缓存/fallback；Local 与 MCP Adapter 均支持校验、超时、熔断和统计 |
+| 幂等保护     | Redis 按 tool_name + action_id 保存参数指纹、状态和结果   |
+| 韧性策略     | Local Adapter 提供校验、超时、缓存、熔断、fallback 和统计 |
 
 **工具契约由 ToolSpec 描述。** 每个工具包含 name、description、input_schema、output_schema、tool_type、timeout_s、cache_ttl 和 supports_rerank。调用前使用轻量 JSON Schema 规则检查 required、基础类型和 enum；失败时返回结构化 ToolResult，而不是直接抛出到 Agent。
 
-**MCP 工具在启动时动态发现。** MCPClient 通过官方 stdio_client 创建读写流，建立 ClientSession 并执行 initialize；随后 list_tools 获取 Server 暴露的名称、描述和 inputSchema。`MCPToolAdapter.discover()` 把这些定义转换为 ToolSpec，其中 create_refund、create_ticket 由应用侧标记为 WRITE，其余默认为 READ。
+**RPC 工具在启动时显式注册。** 工具名称、JSON Schema 和 READ/WRITE 类型都由代码审查控制，不依赖远端发现结果推断写权限。`/tools` 暴露当前 ToolRegistry 契约；`/mcp/tools` 仅保留为兼容别名。
 
 **ToolRegistry 是统一治理入口。** Agent 调用工具时依次检查：工具是否注册、工具是否在 Agent 白名单、WRITE 工具是否携带 action_id、action_id 是否已确认。只有四项全部通过才会委托 Adapter 执行。白名单在 Agent 初始化时注册，因此越权调用即使工具本身存在也会被拒绝。
 
-**两类 Adapter 共享基础韧性。** LocalToolAdapter 提供 TTL 缓存、fallback、熔断与统计；MCPToolAdapter 提供参数校验、asyncio 超时、CLOSED/OPEN/HALF_OPEN 熔断和 ToolStats。主监控直接读取 ToolRegistry 聚合结果，远端 MCP 工具失败不再游离于监控之外。
+**Adapter 共享基础韧性。** LocalToolAdapter 提供 TTL 缓存、fallback、参数校验、asyncio 超时、熔断与 ToolStats。主监控直接读取 ToolRegistry 聚合结果，但不参与 Router 决策。
 
 **确认状态在成功写入后释放。** ToolRegistry 委托 WRITE 工具执行成功后调用 `ConfirmationGate.complete(action_id)`，同时清理 pending 与 confirmed 集合，避免确认令牌在进程内无限累积。业务层仍以强类型输出判断 `created/found`，协议成功不等同于业务成功。
 
-**Mock Server 保证演示可重复。** 订单、物流、退款和工单数据存放在标准 MCP Server 内；create_refund 和 create_ticket 以 action_id 建立进程内幂等映射，并校验 payload hash。相同 action_id 携带不同 payload 时返回 `idempotency_conflict`，不会错误复用旧结果。该映射尚未持久化，替换真实业务 Server 时需要数据库唯一约束或 Redis 原子写。
+**Mock RPC 保证演示可重复。** Mock Client 不保存幂等状态，写结果编号由 action_id 稳定生成。跨实例幂等由 Redis 原子抢占和结果存储提供；替换真实业务 RPC 时仍需下游数据库唯一约束。
 
 ### 4.4 Hybrid RAG
 
@@ -213,7 +213,7 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 ![Hybrid RAG](../diagrams/2026-08-07T100005/diagram.png)
 
-`Loader → Version Timeline → QueryPlanner → Multi-Query Dense + BM25 → RRF → Cross-Encoder → Citation`
+`Loader → Version Timeline → QueryPlanner → Multi-Query Dense + BM25 → RRF → Cross-Encoder → Evidence Assembly → Grounded Generation → Citation Validation`
 
 | 阶段       | 实现                                                                    |
 | ---------- | ----------------------------------------------------------------------- |
@@ -221,9 +221,11 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 | 切片       | 模型无关 token 预算，默认 chunk_size=500、overlap=80；参数可通过环境变量调整，并使用内容哈希生成 chunk_id 与 parent_id |
 | 查询规划   | 一次结构化 LLM 调用完成指代消解、独立问题生成和最多 3 条 Multi-Query；失败时回退原问题 |
 | 版本时间   | knowledge_id/version/status/effective_at/expires_at 构成不重叠发布区间，支持当前与 as_of 历史检索 |
-| 双路召回   | ChromaDB + BGE Dense，与进程内 BM25 并行检索                            |
+| 双路召回   | 每条 Query 分别执行 ChromaDB + BGE Dense 与进程内 BM25 检索             |
 | 融合与重排 | 每条 Query 分别召回，跨 Query RRF 去重融合后只执行一次 `BAAI/bge-reranker-v2-m3` |
-| 引用与拒答 | 返回 source、title、section、page、chunk_id、knowledge_id 和 version；无相关证据时拒绝回答 |
+| 证据组装   | Top-N 按 chunk_id 和规范化正文去重，默认最多 5 个 chunk、1800 个模型无关 token |
+| 生成与校验 | 只允许基于编号证据生成；每个事实段必须引用；本地校验引用及数字、期限、金额、ID、错误码 |
+| 引用与拒答 | 返回 source、title、section、page、chunk_id、knowledge_id 和 version；检索或生成证据不足时拒绝回答 |
 
 **导入阶段保持结构信息。** `load_document()` 按文件类型分发：TXT 作为单节；Markdown 按标题层级构造 section path；PDF 逐页提取并记录 page。`chunk_sections()` 使用段落、换行、中文标点和空格递归切分，再按模型无关 token 单元执行硬预算与 overlap，避免简单定长截断破坏全部语义边界。`RAG_CHUNK_SIZE_TOKENS` 与 `RAG_CHUNK_OVERLAP_TOKENS` 只影响新导入或重新索引的文档。
 
@@ -239,7 +241,9 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **Cross-Encoder 只处理融合候选。** 启用 reranker 时，将 query 与候选 chunk 组成 pair 批量打分，用 rerank_score 覆盖最终排序分数，再截取 top_k。这样把计算量限制在候选集合，而不是对整个知识库做交叉编码。
 
-**Citation 来自检索元数据。** 最终结果为每个命中生成 Citation，包含 citation_id、chunk_id、source、title、section 和 page。KnowledgeAgent 响应中的 [1] 与返回 citations 同步输出。Dense-only、RRF 和 Reranker 分别使用 `dense_threshold`、`rrf_threshold` 和 `rerank_threshold`，不再用同一个数值比较不同量纲的分数。
+**AnswerGenerator 在受控证据窗口内综合回答。** `RAGAnswerGenerator` 保持重排顺序，按 chunk_id 和规范化正文去重，并在 `max_chunks` 与 `max_context_tokens` 双重预算下组装 evidence。生成模型严格返回 answer、used_citations 和 sufficient_evidence；证据冲突或不足时必须拒答。输出还会经过引用集合、逐段引用以及新增数字、期限、金额、ID、错误码检查，校验失败不会直接面向用户。
+
+**Citation 来自检索元数据。** 最终结果为每个命中生成 Citation，包含 citation_id、chunk_id、source、title、section 和 page。AnswerGenerator 只能使用实际进入证据窗口的引用，KnowledgeAgent 最终只返回回答实际使用的 Citation。Dense-only、RRF 和 Reranker 分别使用 `dense_threshold`、`rrf_threshold` 和 `rerank_threshold`，不再用同一个数值比较不同量纲的分数。
 
 **当前效果结论保持克制。** 三类阈值已有非零默认值，但仍需要真实 no-answer 数据校准；本地确定性评测中的 Dense 和 Hybrid 指标相同，FakeReranker 还降低了 MRR。因此代码链路与拒答机制已经实现，但 BM25 和重排是否带来效果增益仍需真实模型与更有区分度的数据集验证。
 
@@ -260,15 +264,15 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **工作记忆使用有界压缩。** 每轮消息写入 Redis List，达到 15 条时触发压缩。系统把旧摘要与待压缩消息一起交给 LLM，生成一份全新的覆盖式摘要，最大 600 字，然后只保留最近 5 条原始消息。覆盖而不是追加可以阻止摘要随轮次无限膨胀。
 
-**情景记忆采用事件触发写入。** 普通消息和摘要压缩不会写入 Chroma episodic collection；只有任务完成或转人工时，API 才异步调用 `record_episodic_event()`。事件记录包含会话摘要、event_type、intent 和 trace_id，使跨会话检索返回的是有结果语义的历史片段，而不是任意聊天碎片。
+**情景记忆采用事件触发写入。** 普通消息和摘要压缩不会写入 Chroma episodic collection；只有任务完成或转人工时，API 才在会话锁释放前调用 `record_episodic_event()`。这确保事件只包含当前轮已提交的消息，不会混入同一 conv_id 的下一轮请求。
 
 **用户画像有稳定偏好门控。** 只有近期文本命中“我喜欢”“以后都”“请用中文”等稳定偏好信号时才调用 LLM 提炼画像；结果必须通过字段白名单，并过滤订单号、运单号、退款状态等时效事实。画像更新采用读取旧值、合并、删除旧文档、写入新文档的覆盖方式。
 
-**上下文装配顺序固定。** MemoryContext 将 Skills、DialogueState、最近消息、会话摘要、相关历史、用户画像和 Observation 分区输出。不同数据源保留标签与边界，使下游 Agent 能区分“用户刚说的话”“系统确认的状态”和“语义检索到的历史”。
+**上下文装配顺序固定。** MemoryContext 将 DialogueState、最近消息、会话摘要、相关历史、用户画像和 Observation 分区输出。售后 Skill 不在 API 层全局注入，而是在路由确定 `AfterSalesAgent + intent` 后单独解析并传给 ReActPlanner。
 
 **同步存储调用不阻塞事件循环。** `_backend_call()` 识别异步客户端；对于同步 Redis / Chroma 方法统一使用 `asyncio.to_thread()`。RAG 工具和 `/search` 也把同步 Retriever 查询移出事件循环，避免单次向量检索阻塞并发请求。
 
-**后台记忆任务有完整生命周期。** 每轮消息写入后同步触发稳定偏好画像更新；任务完成或转人工时，情景记忆通过 `_spawn_background_task()` 登记。任务异常会进入日志，应用关停时 `_drain_background_tasks()` 先等待、再取消超时任务，降低无跟踪 `create_task()` 导致的数据丢失。
+**会话事务覆盖记忆提交。** Redis 分布式锁覆盖上下文读取、Agent 执行、DialogueState 保存、消息写入和情景记忆事件。相同 user_id + conv_id 串行，不同会话仍可并发。
 
 ## 5. 可观测性与质量验证
 
@@ -287,7 +291,7 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **PerformanceMonitor 周期拉取运行统计。** 监控任务按 interval 读取 CustomerAgentRuntime 与 ToolRegistry 的成功率、平均延迟、连续失败数和熔断状态。滑动窗口 Z-score 用于识别突变，固定阈值用于告警；可选 Webhook 异步发送告警，Prometheus 暴露 Gauge 和 Counter。
 
-**主链路统计已经统一。** CustomerAgentRuntime 按领域 Agent 记录请求数、成功率和延迟；MCPToolAdapter 提供工具统计与熔断状态；`/monitor` 和 `/health` 直接读取这些主链路数据。确定性 Router 当前不做基于性能的动态改路由。
+**主链路统计已经统一。** CustomerAgentRuntime 按领域 Agent 记录请求数、成功率和延迟；LocalToolAdapter 提供工具统计与熔断状态；`/monitor` 和 `/health` 直接读取这些数据。Monitor 只负责观测和告警，不计算或写回动态路由权重。
 
 ### 本地确定性评测
 
@@ -316,7 +320,7 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 Chunking 另有独立黄金评测集 `data/eval/rag_chunking_cases.json`。`evaluation/chunking_eval.py` 实际执行 `load_document → chunk_sections → BM25Index`，检查 Retrieval Hit Rate、MRR、证据完整率、Section 准确率和 token 预算违规；该评测不使用 FakeDense 或 FakeReranker，也不代表真实向量模型效果。
 
-全量 pytest 覆盖状态转移、跨轮恢复、确认门禁、MCP initialize/list/call、退款与工单幂等、RAG Loader/索引/融合、QueryPlanner、知识版本时间线、记忆压缩与画像门控、主链路监控、后台任务 drain、Trace allowlist 和 API 回归。当前验证结果为 294 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
+全量 pytest 覆盖状态转移、会话并发锁、内部 RPC、Redis 共享幂等、原生 Tool Calling、售后 Skill、确认门禁、RAG Loader/索引/融合、知识版本、记忆、监控、Trace 和 API 回归。当前验证结果为 381 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
 
 ## 6. API 与部署形态
 
@@ -331,16 +335,18 @@ Chunking 另有独立黄金评测集 `data/eval/rag_chunking_cases.json`。`eval
 
 ### 应用启动顺序与配置
 
-lifespan 启动时首先校验 `ANTHROPIC_API_KEY`，读取模型、base_url、Skills 目录和 Redis/Chroma 地址。随后 SkillManager 扫描 SKILL.md、JSON、Markdown 或 TXT 文件，把匹配的业务规则限制在最大 Prompt 字符数内。主运行时把受控的 Skills、摘要、相关历史和画像片段加入 KnowledgeAgent 检索 query；ServiceAgent 的业务动作仍由确定性领域代码决定。旧 AgentOrchestrator 只在 `ENABLE_LEGACY_EVAL=true` 时初始化。
+lifespan 启动时首先校验 `ANTHROPIC_API_KEY`，读取模型、Skills 目录和 Redis/Chroma 地址。SkillManager 只向 AfterSalesAgent 提供匹配当前售后意图的软策略；OrderAgent、LogisticsAgent 和 KnowledgeAgent 不注入 Skill。权限、确认、资格和幂等始终由代码与 RPC 保证。
 
 Redis 同时服务 DialogueState 与工作记忆，但使用不同 key 空间；ChromaDB 优先连接独立服务，失败后回退本地 PersistentClient。KnowledgeBase 为空时写入演示知识，KnowledgeRuntime 再基于 collection 构建 Dense/BM25/Reranker 链路。若启用本地 BGE 模型，首次启动需要准备模型缓存。
 
-MCPClient 使用当前 Python 解释器拉起 `python -m mcp_server.customer_service_server`，并通过 PYTHONPATH 指向项目根目录。应用退出时按 best-effort 顺序停止 Monitor、关闭 MCP session 和 MemoryManager，即使单个资源清理失败也继续释放其余资源。
+内部 RPC 默认装配可重复的 Mock Client，未来可替换为真实 HTTP、Thrift 或 gRPC Client。应用退出时按 best-effort 顺序停止 Monitor 并关闭 MemoryManager。
 
 | 关键配置                     | 作用                                                     |
 | ---------------------------- | -------------------------------------------------------- |
 | `ANTHROPIC_MODEL / BASE_URL` | 选择结构化 NLU、摘要和 legacy Agent 使用的模型与兼容端点 |
 | `REDIS_URL`                  | DialogueState、工作记忆和会话摘要连接地址                |
+| `ACTION_IDEMPOTENCY_TTL_S`   | 写 RPC 幂等状态与结果的 Redis 保留时间                   |
+| `CONVERSATION_LOCK_LEASE_S`  | 同一会话分布式锁租约时间                                 |
 | `CHROMA_HOST / CHROMA_PORT`  | 知识库、情景记忆和用户画像的 ChromaDB 服务地址           |
 | `RAG_EMBEDDING_PROVIDER`     | 选择 `api / local / off` 检索模型策略                     |
 | `RAG_DENSE_THRESHOLD`        | Dense-only 模式的证据阈值                                |
@@ -351,6 +357,10 @@ MCPClient 使用当前 Python 解释器拉起 `python -m mcp_server.customer_ser
 | `RAG_MULTI_QUERY_ENABLED`     | 是否启用指代消解与 Multi-Query QueryPlanner              |
 | `RAG_MULTI_QUERY_MAX_QUERIES` | 单次知识检索允许的最大查询数量，默认 3                   |
 | `RAG_QUERY_REWRITE_MIN_CONFIDENCE` | 接受 LLM 问题改写的最低置信度                       |
+| `RAG_GENERATION_ENABLED`      | 是否启用 Top-N 证据约束生成，默认开启                    |
+| `RAG_ANSWER_MAX_CHUNKS`       | 单次回答最多组装的重排证据数，默认 5                     |
+| `RAG_ANSWER_MAX_CONTEXT_TOKENS` | 单次回答的证据 Token 预算，默认 1800                   |
+| `RAG_ANSWER_TIMEOUT_S`        | 证据生成超时，超时后降级为抽取式回答                    |
 | `GGBOT_SKILLS_DIR`           | 业务 Skill 的扫描目录，支持运行时 reload                 |
 | `ENABLE_LEGACY_EVAL`         | 仅在显式需要时初始化旧 LLM evaluator                     |
 

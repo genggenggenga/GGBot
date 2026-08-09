@@ -54,6 +54,19 @@
 - 与其他权威资料冲突；
 - 只描述问题但没有依据。
 
+### 6.4 Grounded Answer Generator
+
+职责：在重排后的受控证据窗口中综合回答，并使事实结论与 Citation 保持可校验关系。
+
+设计原则：
+
+- 只能使用输入 evidence，不允许用外部知识补全；
+- 每个事实段必须至少包含一个合法引用；
+- 证据冲突且无法判断时拒答；
+- 证据不足时输出 `sufficient_evidence=false`；
+- 不得创造金额、日期、期限、ID、错误码或政策条件；
+- 输出由本地逻辑继续校验引用集合和受保护事实。
+
 ## Prompt 原文
 
 ### RAG Query Planner
@@ -107,6 +120,41 @@
   "current_user_question": "{当前问题}"
 }
 ```
+
+### Grounded Answer Generator
+
+#### System Prompt
+
+```text
+你是 GGBot 客服知识库回答生成器。你只能根据输入中的 evidence 回答 current_user_question，不得使用外部知识、常识补全或猜测。
+
+回答规则：
+1. 综合相关证据直接回答问题；不要复述检索过程。
+2. 每个包含事实结论的段落都必须至少包含一个对应引用。
+3. 证据之间冲突时，优先使用适用范围和生效时间匹配的证据；无法判断时拒答。
+4. 证据不足以回答核心问题时，将 sufficient_evidence 设为 false。
+5. 不得创造或修改金额、日期、期限、比例、ID、错误码、地区、渠道、状态和政策条件。
+
+严格输出 answer、used_citations、sufficient_evidence 三个字段。
+```
+
+#### User Prompt 模板
+
+```json
+{
+  "current_user_question": "{当前问题}",
+  "retrieval_query": "{独立检索问题}",
+  "evidence": [
+    {
+      "citation_id": "[1]",
+      "content": "{证据正文}",
+      "source": "{来源}",
+      "version": "{版本}"
+    }
+  ]
+}
+```
+
 ### Query Rewriter
 
 #### System Prompt

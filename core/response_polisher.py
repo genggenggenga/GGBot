@@ -91,6 +91,7 @@ class ResponsePolisher:
         self,
         llm_call: LLMCall,
         *,
+        structured_client: Any = None,
         enabled: bool = True,
         min_chars: int = 120,
         timeout_s: float = 3.0,
@@ -100,6 +101,7 @@ class ResponsePolisher:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         self._llm_call = llm_call
+        self._structured_client = structured_client
         self._enabled = enabled
         self._min_chars = min_chars
         self._timeout_s = timeout_s
@@ -117,16 +119,29 @@ class ResponsePolisher:
 
         started = time.monotonic()
         try:
-            raw = await asyncio.wait_for(
-                self._llm_call(build_prompt(
-                    original_response=request.original_response,
-                    response_kind=request.response_kind.value,
-                    protected_facts=request.protected_facts,
-                    required_citations=request.required_citations,
-                )),
-                timeout=self._timeout_s,
+            prompt = build_prompt(
+                original_response=request.original_response,
+                response_kind=request.response_kind.value,
+                protected_facts=request.protected_facts,
+                required_citations=request.required_citations,
             )
-            result = PolishResult.model_validate(self._parse_json(raw))
+            if self._structured_client is not None:
+                result = await asyncio.wait_for(
+                    self._structured_client.generate(
+                        prompt,
+                        PolishResult,
+                        tool_name="submit_polished_response",
+                        max_tokens=512,
+                        temperature=0.0,
+                    ),
+                    timeout=self._timeout_s,
+                )
+            else:
+                raw = await asyncio.wait_for(
+                    self._llm_call(prompt),
+                    timeout=self._timeout_s,
+                )
+                result = PolishResult.model_validate(self._parse_json(raw))
             self._validate(request, result)
             return PolishOutcome(
                 response=result.response,
@@ -264,11 +279,7 @@ class ResponsePolisher:
     @staticmethod
     def _parse_json(raw: str) -> Dict[str, Any]:
         text = str(raw).strip()
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start < 0 or end <= start:
-            raise ValueError("response polisher output is not JSON")
-        data = json.loads(text[start:end])
+        data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("response polisher output must be an object")
         return data
