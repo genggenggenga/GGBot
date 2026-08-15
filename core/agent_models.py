@@ -40,6 +40,19 @@ class ExecutionState(str, Enum):
     FAILED = "failed"
 
 
+class TurnEventType(str, Enum):
+    CLARIFICATION_REQUIRED = "clarification_required"
+    UNDERSTANDING_ACCEPTED = "understanding_accepted"
+    ACTION_REJECTED = "action_rejected"
+    ROUTED_TO_KNOWLEDGE = "routed_to_knowledge"
+    ROUTED_TO_ACTION = "routed_to_action"
+    AGENT_FAILED = "agent_failed"
+    SLOTS_MISSING = "slots_missing"
+    WRITE_CONFIRMATION_REQUIRED = "write_confirmation_required"
+    AGENT_COMPLETED = "agent_completed"
+    RESPONSE_READY = "response_ready"
+
+
 class DecisionType(str, Enum):
     TOOL = "tool"
     FINISH = "finish"
@@ -101,6 +114,18 @@ class Observation(BaseModel):
         return self
 
 
+class TurnEvent(BaseModel):
+    """Semantic event emitted by a state handler before transition resolution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: TurnEventType
+    dialogue_updates: Dict[str, Any] = Field(default_factory=dict)
+    observations: List[Observation] = Field(default_factory=list)
+    response: Optional[str] = None
+    reason: Optional[str] = Field(default=None, min_length=1)
+
+
 class UnderstandingResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -153,6 +178,7 @@ class Transition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     next_state: ExecutionState
+    event: TurnEventType
     dialogue_updates: Dict[str, Any] = Field(default_factory=dict)
     observations: List[Observation] = Field(default_factory=list)
     response: Optional[str] = None

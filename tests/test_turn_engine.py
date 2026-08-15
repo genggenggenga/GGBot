@@ -7,17 +7,25 @@ from core.agent_models import (
     PendingAction,
     Transition,
     TurnContext,
+    TurnEvent,
+    TurnEventType,
 )
 from core.state_store import InMemoryStateStore
 from core.turn_engine import (
     InvalidTransitionError,
     TurnEngine,
     apply_transition,
+    supported_event_types,
+    transition_from_event,
 )
 
 
-def transition(next_state: ExecutionState, reason: str = "test") -> Transition:
-    return Transition(next_state=next_state, reason=reason)
+def raw_transition(
+    next_state: ExecutionState,
+    reason: str = "test",
+    event: TurnEventType = TurnEventType.RESPONSE_READY,
+) -> Transition:
+    return Transition(next_state=next_state, event=event, reason=reason)
 
 
 @pytest.mark.asyncio
@@ -26,16 +34,27 @@ async def test_normal_execution_completes_and_persists_state():
     engine = TurnEngine(store)
     engine.register(
         ExecutionState.UNDERSTANDING,
-        lambda _: transition(ExecutionState.ROUTING),
+        lambda _: TurnEvent(
+            type=TurnEventType.UNDERSTANDING_ACCEPTED,
+        ),
     )
     engine.register(
         ExecutionState.ROUTING,
-        lambda _: transition(ExecutionState.RESPONDING),
+        lambda _: TurnEvent(
+            type=TurnEventType.ROUTED_TO_KNOWLEDGE,
+        ),
+    )
+    engine.register(
+        ExecutionState.RETRIEVING,
+        lambda _: TurnEvent(
+            type=TurnEventType.AGENT_COMPLETED,
+            response="处理完成",
+        ),
     )
     engine.register(
         ExecutionState.RESPONDING,
-        lambda _: Transition(
-            next_state=ExecutionState.COMPLETED,
+        lambda _: TurnEvent(
+            type=TurnEventType.RESPONSE_READY,
             response="处理完成",
             reason="response_ready",
         ),
@@ -51,10 +70,60 @@ async def test_normal_execution_completes_and_persists_state():
 
     assert result.execution_state == ExecutionState.COMPLETED
     assert result.response == "处理完成"
-    assert result.step_count == 3
+    assert result.step_count == 4
     persisted = await store.load("u1", "c1")
     assert persisted is not None
     assert persisted.active_intent == "order_query"
+
+
+@pytest.mark.asyncio
+async def test_engine_accepts_turn_event_handler_output():
+    store = InMemoryStateStore()
+    engine = TurnEngine(store)
+    engine.register(
+        ExecutionState.UNDERSTANDING,
+        lambda _: TurnEvent(
+            type=TurnEventType.UNDERSTANDING_ACCEPTED,
+            dialogue_updates={"active_intent": "order_query"},
+        ),
+    )
+    engine.register(
+        ExecutionState.ROUTING,
+        lambda _: TurnEvent(
+            type=TurnEventType.ROUTED_TO_KNOWLEDGE,
+            dialogue_updates={"last_agent": "knowledge"},
+        ),
+    )
+    engine.register(
+        ExecutionState.RETRIEVING,
+        lambda _: TurnEvent(
+            type=TurnEventType.AGENT_COMPLETED,
+            response="查询完成",
+        ),
+    )
+    engine.register(
+        ExecutionState.RESPONDING,
+        lambda _: TurnEvent(
+            type=TurnEventType.RESPONSE_READY,
+            response="查询完成",
+        ),
+    )
+
+    result = await engine.run(TurnContext(user_id="u1", conv_id="c1"))
+    persisted = await store.load("u1", "c1")
+
+    assert result.execution_state == ExecutionState.COMPLETED
+    assert result.response == "查询完成"
+    assert result.state_history == [
+        ExecutionState.UNDERSTANDING,
+        ExecutionState.ROUTING,
+        ExecutionState.RETRIEVING,
+        ExecutionState.RESPONDING,
+        ExecutionState.COMPLETED,
+    ]
+    assert persisted is not None
+    assert persisted.active_intent == "order_query"
+    assert persisted.last_agent == "knowledge"
 
 
 def test_illegal_transition_is_rejected_before_context_changes():
@@ -66,11 +135,95 @@ def test_illegal_transition_is_rejected_before_context_changes():
     ):
         apply_transition(
             context,
-            transition(ExecutionState.COMPLETED),
+            raw_transition(ExecutionState.COMPLETED),
         )
 
     assert context.execution_state == ExecutionState.UNDERSTANDING
     assert context.step_count == 0
+
+
+def test_event_transition_must_match_declared_next_state():
+    context = TurnContext(user_id="u1", conv_id="c1")
+
+    result = apply_transition(
+        context,
+        Transition(
+            next_state=ExecutionState.ROUTING,
+            event=TurnEventType.UNDERSTANDING_ACCEPTED,
+            reason="understanding_complete",
+        ),
+    )
+
+    assert result.execution_state == ExecutionState.ROUTING
+
+    with pytest.raises(
+        InvalidTransitionError,
+        match="event transition mismatch",
+    ):
+        apply_transition(
+            context,
+            Transition(
+                next_state=ExecutionState.CLARIFYING,
+                event=TurnEventType.UNDERSTANDING_ACCEPTED,
+                reason="wrong_next_state",
+            ),
+        )
+
+
+def test_transition_from_event_resolves_next_state_and_preserves_payload():
+    event = TurnEvent(
+        type=TurnEventType.CLARIFICATION_REQUIRED,
+        dialogue_updates={
+            "active_intent": "refund_request",
+            "missing_slots": ["order_id"],
+            "required_slots": ["order_id"],
+        },
+        response="请提供订单号。",
+        reason="missing_slot:order_id",
+    )
+
+    transition = transition_from_event(
+        ExecutionState.UNDERSTANDING,
+        event,
+    )
+
+    assert transition.next_state == ExecutionState.CLARIFYING
+    assert transition.event == TurnEventType.CLARIFICATION_REQUIRED
+    assert transition.dialogue_updates == event.dialogue_updates
+    assert transition.observations == []
+    assert transition.response == "请提供订单号。"
+    assert transition.reason == "missing_slot:order_id"
+
+
+def test_transition_from_event_uses_event_type_as_default_reason():
+    transition = transition_from_event(
+        ExecutionState.RESPONDING,
+        TurnEvent(type=TurnEventType.RESPONSE_READY),
+    )
+
+    assert transition.next_state == ExecutionState.COMPLETED
+    assert transition.reason == "response_ready"
+
+
+def test_every_turn_event_type_has_declared_transition():
+    assert supported_event_types() == set(TurnEventType)
+
+
+def test_event_must_be_allowed_for_current_state():
+    context = TurnContext(user_id="u1", conv_id="c1")
+
+    with pytest.raises(
+        InvalidTransitionError,
+        match="event not allowed",
+    ):
+        apply_transition(
+            context,
+            Transition(
+                next_state=ExecutionState.ROUTING,
+                event=TurnEventType.RESPONSE_READY,
+                reason="wrong_event",
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -78,7 +231,7 @@ async def test_handler_illegal_transition_becomes_structured_failure():
     engine = TurnEngine(InMemoryStateStore())
     engine.register(
         ExecutionState.UNDERSTANDING,
-        lambda _: transition(ExecutionState.COMPLETED),
+        lambda _: TurnEvent(type=TurnEventType.RESPONSE_READY),
     )
 
     result = await engine.run(TurnContext(user_id="u1", conv_id="c1"))
@@ -94,8 +247,8 @@ async def test_clarifying_pauses_and_can_be_restored_next_turn():
     engine = TurnEngine(store)
     engine.register(
         ExecutionState.UNDERSTANDING,
-        lambda _: Transition(
-            next_state=ExecutionState.CLARIFYING,
+        lambda _: TurnEvent(
+            type=TurnEventType.CLARIFICATION_REQUIRED,
             dialogue_updates={
                 "active_intent": "refund_request",
                 "required_slots": ["order_id"],
@@ -130,12 +283,15 @@ async def test_filled_slot_resumes_from_routing_on_the_next_turn():
     engine = TurnEngine(store)
     engine.register(
         ExecutionState.ROUTING,
-        lambda _: transition(ExecutionState.RESPONDING),
+        lambda _: TurnEvent(
+            type=TurnEventType.ACTION_REJECTED,
+            response="已继续处理退款申请。",
+        ),
     )
     engine.register(
         ExecutionState.RESPONDING,
-        lambda _: Transition(
-            next_state=ExecutionState.COMPLETED,
+        lambda _: TurnEvent(
+            type=TurnEventType.RESPONSE_READY,
             response="已继续处理退款申请。",
             reason="response_ready",
         ),
@@ -201,14 +357,22 @@ async def test_confirmed_action_continues_on_the_next_turn():
     engine = TurnEngine(store)
     engine.register(
         ExecutionState.ACTING,
-        lambda _: Transition(
-            next_state=ExecutionState.COMPLETED,
+        lambda _: TurnEvent(
+            type=TurnEventType.AGENT_COMPLETED,
             dialogue_updates={
                 "pending_action": None,
                 "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
             },
             response="退款申请已提交。",
             reason="refund_created",
+        ),
+    )
+    engine.register(
+        ExecutionState.RESPONDING,
+        lambda context: TurnEvent(
+            type=TurnEventType.RESPONSE_READY,
+            response=context.response,
+            reason="response_ready",
         ),
     )
 
@@ -227,11 +391,11 @@ async def test_step_limit_fails_with_handoff_package():
     engine = TurnEngine(store, max_steps=2)
     engine.register(
         ExecutionState.ROUTING,
-        lambda _: transition(ExecutionState.RETRIEVING),
+        lambda _: TurnEvent(type=TurnEventType.ROUTED_TO_KNOWLEDGE),
     )
     engine.register(
         ExecutionState.RETRIEVING,
-        lambda _: transition(ExecutionState.RETRIEVING),
+        lambda _: TurnEvent(type=TurnEventType.AGENT_COMPLETED),
     )
     context = TurnContext(
         user_id="u1",
@@ -258,7 +422,7 @@ async def test_handler_failure_creates_structured_handoff():
     store = InMemoryStateStore()
     engine = TurnEngine(store)
 
-    def broken_handler(_: TurnContext) -> Transition:
+    def broken_handler(_: TurnContext) -> TurnEvent:
         raise RuntimeError("private detail")
 
     engine.register(ExecutionState.UNDERSTANDING, broken_handler)
@@ -296,5 +460,5 @@ def test_terminal_handlers_and_invalid_max_steps_are_rejected():
     with pytest.raises(ValueError, match="terminal state"):
         engine.register(
             ExecutionState.COMPLETED,
-            lambda _: transition(ExecutionState.FAILED),
+            lambda _: TurnEvent(type=TurnEventType.AGENT_FAILED),
         )

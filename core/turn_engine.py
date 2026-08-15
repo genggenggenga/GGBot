@@ -1,6 +1,6 @@
 """Lightweight, explicit turn-level state machine for Agent execution."""
 import inspect
-from typing import Awaitable, Callable, Dict, Union
+from typing import Awaitable, Callable, Dict, Set, Union
 
 from core.agent_models import (
     ConfirmationStatus,
@@ -9,6 +9,8 @@ from core.agent_models import (
     HandoffPackage,
     Transition,
     TurnContext,
+    TurnEvent,
+    TurnEventType,
 )
 from core.state_store import StateStore
 
@@ -17,56 +19,9 @@ class InvalidTransitionError(ValueError):
     """Raised when a handler requests a transition not allowed by the graph."""
 
 
-HandlerResult = Union[Transition, Awaitable[Transition]]
+HandlerResult = Union[TurnEvent, Awaitable[TurnEvent]]
 StateHandler = Callable[[TurnContext], HandlerResult]
 
-
-_ALLOWED_TRANSITIONS = {
-    ExecutionState.UNDERSTANDING: {
-        ExecutionState.CLARIFYING,
-        ExecutionState.ROUTING,
-        ExecutionState.FAILED,
-    },
-    ExecutionState.CLARIFYING: {
-        ExecutionState.UNDERSTANDING,
-        ExecutionState.ROUTING,
-        ExecutionState.FAILED,
-    },
-    ExecutionState.ROUTING: {
-        ExecutionState.RETRIEVING,
-        ExecutionState.ACTING,
-        ExecutionState.RESPONDING,
-        ExecutionState.FAILED,
-    },
-    ExecutionState.RETRIEVING: {
-        ExecutionState.CLARIFYING,
-        ExecutionState.RETRIEVING,
-        ExecutionState.ACTING,
-        ExecutionState.RESPONDING,
-        ExecutionState.FAILED,
-    },
-    ExecutionState.ACTING: {
-        ExecutionState.CLARIFYING,
-        ExecutionState.RETRIEVING,
-        ExecutionState.ACTING,
-        ExecutionState.AWAITING_CONFIRMATION,
-        ExecutionState.RESPONDING,
-        ExecutionState.COMPLETED,
-        ExecutionState.FAILED,
-    },
-    ExecutionState.AWAITING_CONFIRMATION: {
-        ExecutionState.ACTING,
-        ExecutionState.RESPONDING,
-        ExecutionState.COMPLETED,
-        ExecutionState.FAILED,
-    },
-    ExecutionState.RESPONDING: {
-        ExecutionState.COMPLETED,
-        ExecutionState.FAILED,
-    },
-    ExecutionState.COMPLETED: set(),
-    ExecutionState.FAILED: set(),
-}
 
 _PAUSED_STATES = {
     ExecutionState.CLARIFYING,
@@ -77,18 +32,118 @@ _TERMINAL_STATES = {
     ExecutionState.FAILED,
 }
 
+_EVENT_TRANSITIONS = {
+    (ExecutionState.UNDERSTANDING, TurnEventType.CLARIFICATION_REQUIRED): (
+        ExecutionState.CLARIFYING
+    ),
+    (ExecutionState.UNDERSTANDING, TurnEventType.UNDERSTANDING_ACCEPTED): (
+        ExecutionState.ROUTING
+    ),
+    (ExecutionState.ROUTING, TurnEventType.ACTION_REJECTED): (
+        ExecutionState.RESPONDING
+    ),
+    (ExecutionState.ROUTING, TurnEventType.ROUTED_TO_KNOWLEDGE): (
+        ExecutionState.RETRIEVING
+    ),
+    (ExecutionState.ROUTING, TurnEventType.ROUTED_TO_ACTION): (
+        ExecutionState.ACTING
+    ),
+    (ExecutionState.RETRIEVING, TurnEventType.AGENT_FAILED): (
+        ExecutionState.FAILED
+    ),
+    (ExecutionState.RETRIEVING, TurnEventType.SLOTS_MISSING): (
+        ExecutionState.CLARIFYING
+    ),
+    (ExecutionState.RETRIEVING, TurnEventType.AGENT_COMPLETED): (
+        ExecutionState.RESPONDING
+    ),
+    (ExecutionState.ACTING, TurnEventType.AGENT_FAILED): (
+        ExecutionState.FAILED
+    ),
+    (ExecutionState.ACTING, TurnEventType.SLOTS_MISSING): (
+        ExecutionState.CLARIFYING
+    ),
+    (ExecutionState.ACTING, TurnEventType.WRITE_CONFIRMATION_REQUIRED): (
+        ExecutionState.AWAITING_CONFIRMATION
+    ),
+    (ExecutionState.ACTING, TurnEventType.AGENT_COMPLETED): (
+        ExecutionState.RESPONDING
+    ),
+    (ExecutionState.RESPONDING, TurnEventType.RESPONSE_READY): (
+        ExecutionState.COMPLETED
+    ),
+}
 
-def validate_transition(current: ExecutionState, target: ExecutionState) -> None:
+
+def _derive_allowed_transitions() -> Dict[ExecutionState, Set[ExecutionState]]:
+    allowed = {state: set() for state in ExecutionState}
+    for (state, _), target in _EVENT_TRANSITIONS.items():
+        allowed[state].add(target)
+    return allowed
+
+
+_ALLOWED_TRANSITIONS = _derive_allowed_transitions()
+
+
+def supported_event_types() -> Set[TurnEventType]:
+    """Return event types that have at least one declared transition edge."""
+    return {event for _, event in _EVENT_TRANSITIONS}
+
+
+def resolve_next_state(
+    current: ExecutionState,
+    event: TurnEventType,
+) -> ExecutionState:
+    """Resolve an event into its next execution state."""
+    next_state = _EVENT_TRANSITIONS.get((current, event))
+    if next_state is None:
+        raise InvalidTransitionError(
+            f"event not allowed: {current.value} + {event.value}",
+        )
+    return next_state
+
+
+def transition_from_event(
+    current: ExecutionState,
+    event: TurnEvent,
+) -> Transition:
+    """Build the internal Transition for applying a semantic TurnEvent."""
+    return Transition(
+        next_state=resolve_next_state(current, event.type),
+        event=event.type,
+        dialogue_updates=event.dialogue_updates,
+        observations=event.observations,
+        response=event.response,
+        reason=event.reason or event.type.value,
+    )
+
+
+def validate_transition(
+    current: ExecutionState,
+    target: ExecutionState,
+    event: TurnEventType,
+) -> None:
     """Validate a state edge before applying any context changes."""
     if target not in _ALLOWED_TRANSITIONS[current]:
         raise InvalidTransitionError(
             f"illegal transition: {current.value} -> {target.value}",
         )
+    expected = resolve_next_state(current, event)
+    if expected != target:
+        raise InvalidTransitionError(
+            "event transition mismatch: "
+            f"{current.value} + {event.value} -> {expected.value}, "
+            f"got {target.value}",
+        )
 
 
 def apply_transition(context: TurnContext, transition: Transition) -> TurnContext:
     """Apply one validated transition and return a new runtime context."""
-    validate_transition(context.execution_state, transition.next_state)
+    validate_transition(
+        context.execution_state,
+        transition.next_state,
+        transition.event,
+    )
 
     state_data = context.dialogue_state.model_dump()
     state_data.update(transition.dialogue_updates)
@@ -199,9 +254,13 @@ class TurnEngine:
                 return current
 
             try:
-                transition = handler(current)
-                if inspect.isawaitable(transition):
-                    transition = await transition
+                event = handler(current)
+                if inspect.isawaitable(event):
+                    event = await event
+                transition = transition_from_event(
+                    current.execution_state,
+                    event,
+                )
                 current = apply_transition(current, transition)
             except InvalidTransitionError:
                 current = self._fail(current, "invalid_transition")

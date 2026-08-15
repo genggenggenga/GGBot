@@ -80,7 +80,7 @@
 
 CustomerAgentRuntime 每个请求都会通过 `turn_engine.fork()` 创建独立 handler registry，但复用同一个 StateStore。这样不同请求不会共享临时 handler，同时仍然可以从 Redis 恢复同一会话的 DialogueState。恢复位置不是直接保存 TurnContext，而是由 `resume_state()` 根据 missing_slots、pending_action 和 confirmation_status 推导，减少持久化模型与运行时代码的耦合。
 
-TurnEngine 在进入循环前判断终态；每一步查找当前状态对应的 handler，支持同步或异步返回 Transition。Transition 在应用前必须通过允许边校验，然后统一更新 DialogueState、Observation、状态历史、step_count 和 response。状态更新完成后立即写入 StateStore，因此即使后续步骤失败，前一步已经确认的业务状态仍然可恢复。
+TurnEngine 在进入循环前判断终态；每一步查找当前状态对应的 handler，支持同步或异步返回 `TurnEvent`。`TurnEvent` 只描述“发生了什么”，不携带 `next_state`；TurnEngine 通过 `current_state + event` 查询事件迁移表，生成内部 `Transition` 后再统一更新 DialogueState、Observation、状态历史、step_count 和 response。允许边从事件迁移表派生，避免状态图和事件图漂移。状态更新完成后立即写入 StateStore，因此即使后续步骤失败，前一步已经确认的业务状态仍然可恢复。
 
 ```python
 while state not in terminal_states:
@@ -88,7 +88,8 @@ while state not in terminal_states:
         break
     if step_count >= max_steps:
         return fail_with_handoff("max_steps_exceeded")
-    transition = await handler(context)
+    event = await handler(context)
+    transition = transition_from_event(context.execution_state, event)
     context = apply_transition(context, transition)
     await state_store.save(context.dialogue_state)
 ```
@@ -111,7 +112,7 @@ while state not in terminal_states:
 
 ### 写操作确认、恢复与幂等
 
-**第一轮只建立目标，不执行工具。** “我要退款”被 fast-track 识别为 `refund_request`。DST 根据 INTENT_SCHEMAS 得到必填槽位 `order_id`，发现缺失后写入 missing_slots。UNDERSTANDING handler 返回 CLARIFYING Transition，状态保存后本轮暂停。
+**第一轮只建立目标，不执行工具。** “我要退款”被 fast-track 识别为 `refund_request`。DST 根据 INTENT_SCHEMAS 得到必填槽位 `order_id`，发现缺失后写入 missing_slots。UNDERSTANDING handler 返回 `CLARIFICATION_REQUIRED` 事件，TurnEngine 将其解析为 `CLARIFYING`，状态保存后本轮暂停。
 
 **第二轮先读后写。** 用户补充订单号后，DST 继承已有 active_intent，并把 order_id 合并进 slots。AfterSalesAgent 先调用 `query_order`，再调用 `check_refund_eligibility`。只有订单存在且符合资格时才创建 PendingAction；PendingAction 包含唯一 action_id、目标工具和参数，但此时不会调用 `create_refund`。
 

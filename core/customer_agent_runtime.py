@@ -14,8 +14,9 @@ from agents.domain_agents import (
 from core.agent_models import (
     ConfirmationStatus,
     ExecutionState,
-    Transition,
     TurnContext,
+    TurnEvent,
+    TurnEventType,
     UserAct,
     get_intent_schema,
     get_missing_slots,
@@ -247,29 +248,29 @@ class CustomerAgentRuntime:
         engine: TurnEngine,
         turn_data: Dict[str, Any],
     ) -> None:
-        async def understanding(context: TurnContext) -> Transition:
+        async def understanding(context: TurnContext) -> TurnEvent:
             if turn_data["intent_clarification"]:
-                return Transition(
-                    next_state=ExecutionState.CLARIFYING,
+                return TurnEvent(
+                    type=TurnEventType.CLARIFICATION_REQUIRED,
                     response=turn_data["intent_clarification"],
                     reason="intent_clarification_required",
                 )
             if context.dialogue_state.missing_slots:
                 slot = context.dialogue_state.missing_slots[0]
-                return Transition(
-                    next_state=ExecutionState.CLARIFYING,
+                return TurnEvent(
+                    type=TurnEventType.CLARIFICATION_REQUIRED,
                     response=self._clarification(
                         slot,
                         context.dialogue_state.active_intent,
                     ),
                     reason=f"missing_slot:{slot}",
                 )
-            return Transition(
-                next_state=ExecutionState.ROUTING,
+            return TurnEvent(
+                type=TurnEventType.UNDERSTANDING_ACCEPTED,
                 reason="understanding_complete",
             )
 
-        async def routing(context: TurnContext) -> Transition:
+        async def routing(context: TurnContext) -> TurnEvent:
             if (
                 context.dialogue_state.confirmation_status
                 == ConfirmationStatus.REJECTED
@@ -280,8 +281,8 @@ class CustomerAgentRuntime:
                     if intent == "refund_request"
                     else "已取消创建人工客服工单。"
                 )
-                return Transition(
-                    next_state=ExecutionState.RESPONDING,
+                return TurnEvent(
+                    type=TurnEventType.ACTION_REJECTED,
                     response=response,
                     dialogue_updates={
                         "confirmation_status": ConfirmationStatus.NOT_REQUIRED,
@@ -294,21 +295,22 @@ class CustomerAgentRuntime:
                 turn_data["intents"],
             )
             turn_data["agent"] = ",".join(targets)
-            return Transition(
-                next_state=(
-                    ExecutionState.RETRIEVING
-                    if targets and all(
-                        target == KNOWLEDGE_AGENT for target in targets
-                    )
-                    else ExecutionState.ACTING
-                ),
+            routed_event = (
+                TurnEventType.ROUTED_TO_KNOWLEDGE
+                if targets and all(
+                    target == KNOWLEDGE_AGENT for target in targets
+                )
+                else TurnEventType.ROUTED_TO_ACTION
+            )
+            return TurnEvent(
+                type=routed_event,
                 dialogue_updates={
                     "last_agent": targets[-1] if targets else None,
                 },
                 reason=f"routed_to:{','.join(targets)}",
             )
 
-        async def execute_agent(context: TurnContext) -> Transition:
+        async def execute_agent(context: TurnContext) -> TurnEvent:
             response, results = await self._domain_runtime.execute(
                 context.dialogue_state,
                 turn_data["message"],
@@ -342,8 +344,8 @@ class CustomerAgentRuntime:
                 None,
             )
             if failed is not None:
-                return Transition(
-                    next_state=ExecutionState.FAILED,
+                return TurnEvent(
+                    type=TurnEventType.AGENT_FAILED,
                     observations=observations,
                     response=response,
                     dialogue_updates={
@@ -358,8 +360,8 @@ class CustomerAgentRuntime:
             if missing is not None:
                 remaining = turn_data["intents"][len(results):]
                 schema = get_intent_schema(missing.goal)
-                return Transition(
-                    next_state=ExecutionState.CLARIFYING,
+                return TurnEvent(
+                    type=TurnEventType.SLOTS_MISSING,
                     observations=observations,
                     response=response,
                     dialogue_updates={
@@ -380,8 +382,8 @@ class CustomerAgentRuntime:
             if pending_result is not None:
                 remaining = turn_data["intents"][len(results):]
                 schema = get_intent_schema(pending_result.goal)
-                return Transition(
-                    next_state=ExecutionState.AWAITING_CONFIRMATION,
+                return TurnEvent(
+                    type=TurnEventType.WRITE_CONFIRMATION_REQUIRED,
                     observations=observations,
                     response=response,
                     dialogue_updates={
@@ -420,17 +422,17 @@ class CustomerAgentRuntime:
                 )
                 turn_data["polish_outcome"] = polish_outcome
                 response = polish_outcome.response
-            return Transition(
-                next_state=ExecutionState.RESPONDING,
+            return TurnEvent(
+                type=TurnEventType.AGENT_COMPLETED,
                 observations=observations,
                 response=response,
                 dialogue_updates=updates,
                 reason="agent_completed",
             )
 
-        async def responding(context: TurnContext) -> Transition:
-            return Transition(
-                next_state=ExecutionState.COMPLETED,
+        async def responding(context: TurnContext) -> TurnEvent:
+            return TurnEvent(
+                type=TurnEventType.RESPONSE_READY,
                 response=context.response,
                 reason="response_ready",
             )

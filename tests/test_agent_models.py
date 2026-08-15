@@ -10,6 +10,7 @@ from core.agent_models import (
     PendingAction,
     SlotMode,
     Transition,
+    TurnEventType,
     UnderstandingResult,
     UserAct,
     get_intent_schema,
@@ -62,6 +63,7 @@ def test_runtime_models_support_json_round_trip():
     )
     transition = Transition(
         next_state=ExecutionState.AWAITING_CONFIRMATION,
+        event=TurnEventType.WRITE_CONFIRMATION_REQUIRED,
         dialogue_updates=state.model_dump(mode="json"),
         observations=[observation],
         response="确认提交退款吗？",
@@ -114,6 +116,7 @@ def test_transition_rejects_invalid_execution_state():
     with pytest.raises(ValidationError):
         Transition(
             next_state="unknown",
+            event=TurnEventType.RESPONSE_READY,
             reason="invalid state",
         )
 
