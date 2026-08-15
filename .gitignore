@@ -16,6 +16,18 @@ data/*
 data/eval/*
 !data/eval/customer_agent_cases.json
 !data/eval/rag_chunking_cases.json
+!data/eval/smoke/
+!data/eval/smoke/**
+!data/eval/golden/
+!data/eval/golden/**
+!data/eval/bad_cases/
+!data/eval/bad_cases/**
+!data/eval/knowledge/
+!data/eval/knowledge/**
+!data/eval/manifests/
+!data/eval/manifests/**
+# Generated local evaluation reports.
+data/eval/reports/
 logs/
 
 # IDE

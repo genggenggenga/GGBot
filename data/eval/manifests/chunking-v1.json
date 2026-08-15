@@ -1,0 +1,15 @@
+{
+  "dataset_version": "chunking-v1-candidate",
+  "dataset": "data/eval/rag_chunking_cases.json",
+  "case_count": 80,
+  "anchor_cases": 12,
+  "generated_query_variants": 68,
+  "review_status": "generated_pending_human_calibration",
+  "metrics": [
+    "retrieval_hit_rate",
+    "mrr",
+    "evidence_preservation_rate",
+    "section_accuracy",
+    "budget_violations"
+  ]
+}

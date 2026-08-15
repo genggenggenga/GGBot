@@ -1,0 +1,54 @@
+{
+  "version": "corpus-v1",
+  "description": "Deterministic evaluation corpus shared by smoke, golden, and bad-case RAG suites.",
+  "chunks": [
+    {
+      "chunk_id": "refund-window",
+      "title": "退款政策",
+      "section": "无理由退款",
+      "content": "退款期限：购买后7天内可申请无理由退款。超过7天需提供质量问题凭证。"
+    },
+    {
+      "chunk_id": "refund-shipping",
+      "title": "退款政策",
+      "section": "退货运费",
+      "content": "质量问题退货运费由商家承担，非质量问题退货运费由用户承担。"
+    },
+    {
+      "chunk_id": "logistics-update",
+      "title": "配送服务",
+      "section": "物流更新",
+      "content": "物流信息通常在发货后24小时内更新，可在订单详情页查看实时状态。"
+    },
+    {
+      "chunk_id": "error-401",
+      "title": "技术故障排查",
+      "section": "登录失败",
+      "content": "ERROR-401：认证失败，请重新登录。如持续出现请联系技术支持。"
+    },
+    {
+      "chunk_id": "error-500",
+      "title": "技术故障排查",
+      "section": "服务端错误",
+      "content": "ERROR-500：服务器内部错误，请稍后重试。如持续出现请报告技术团队。"
+    },
+    {
+      "chunk_id": "points-expiry",
+      "title": "会员与积分",
+      "section": "积分抵扣",
+      "content": "积分有效期为12个月，过期后自动清零。"
+    },
+    {
+      "chunk_id": "membership-gold",
+      "title": "会员与积分",
+      "section": "会员等级",
+      "content": "金卡会员享受9折优惠，部分特价商品除外。"
+    },
+    {
+      "chunk_id": "delivery-express",
+      "title": "配送服务",
+      "section": "配送时效",
+      "content": "标准配送免费；加急配送加收15元，次日达加收25元。"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "dataset_version": "golden-v1-candidate",
+  "corpus_version": "corpus-v1",
+  "dataset": "data/eval/golden/golden-v1.json",
+  "review_status": "generated_pending_human_calibration",
+  "promotion_rule": "A case becomes release-golden only after independent human label review.",
+  "intended_size": 280,
+  "current_size": 280,
+  "coverage": {
+    "NLU": 50,
+    "DST": 60,
+    "TOOL": 60,
+    "RAG": 70,
+    "E2E": 40
+  },
+  "notes": [
+    "This manifest prevents the generated candidate fixture from being represented as a fully human-calibrated Golden Set.",
+    "Historical production issues should be added to bad_cases first, then promoted after review."
+  ]
+}

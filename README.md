@@ -70,7 +70,7 @@ RPC Client 提供订单、物流、售后和工单操作。写操作通过 Redis
 
 ## RAG 与评测
 
-RAG 链路由 ChromaDB Dense、独立 BM25、RRF、Cross-Encoder Reranker、受约束 Top-N 证据生成和 Citation 校验组成。50 条固定评测样本位于 `data/eval/customer_agent_cases.json`。
+RAG 链路由 ChromaDB Dense、独立 BM25、RRF、Cross-Encoder Reranker、受约束 Top-N 证据生成和 Citation 校验组成。评测采用分层的 Code-based Evaluator 与可选 LLM-as-Judge；详见 [评测框架](docs/evaluation-framework.md)。
 
 文档切片按模型无关 token 预算执行，默认每个 chunk 最多 500 tokens、相邻 chunk 重叠 80 tokens。可通过环境变量调整：
 
@@ -90,7 +90,10 @@ export RAG_ANSWER_TIMEOUT_S=8
 
 ```bash
 .venv/bin/python -m pytest -q
-.venv/bin/python -m evaluation.local_eval_runner
+.venv/bin/python -m evaluation.run --suite smoke --mode deterministic
+.venv/bin/python -m evaluation.run --suite bad_cases --mode deterministic
+.venv/bin/python -m evaluation.run --suite golden --mode deterministic
+.venv/bin/python -m evaluation.run --suite golden --mode deterministic --judge
 .venv/bin/python -m evaluation.chunking_eval
 .venv/bin/python -m evaluation.chunking_eval --chunk-size 256 --chunk-overlap 32
 curl -s -X POST http://localhost:8000/eval/run \
@@ -127,20 +130,6 @@ curl -s -X POST \
 
 同一 `knowledge_id` 的已发布版本会按 `effective_at` 自动形成不重叠时间线。旧版本保留用于审计和历史检索，`draft`、`revoked` 以及查询时间点未生效或已失效的版本不会参与召回。
 
-最新本地确定性评测报告位于 `data/eval/eval_report.md`。该报告实际逐条执行 50 条固定样本，结果如下：
+评测输入数据位于 `data/eval/`，运行产生的 JSON 与 Markdown 报告统一写入 `data/eval/reports/`，该目录不纳入版本控制。当前 Smoke、Bad-case、Golden Candidate 和 Chunking 集分别包含 90、50、280 和 80 条用例。
 
-| 指标 | 实测值 |
-|------|--------|
-| Intent Accuracy / Macro-F1 | 1.0000 / 1.0000 |
-| User Act Accuracy | 1.0000 |
-| Slot F1 / DST Joint Goal Accuracy | 1.0000 / 1.0000 |
-| Recall@5 / MRR | 0.9000 / 0.8500 |
-| Tool Selection / Parameter Accuracy | 1.0000 / 1.0000 |
-| Task Completion Rate | 1.0000 |
-| Citation Precision / Faithfulness | 0.4091 / 0.9000 |
-
-消融结果位于 `data/eval/ablation_report.json`。Dense 与 Hybrid 的 Recall@5、MRR 均为 `0.9000`、`0.8500`；Hybrid + Reranker 的 Recall@5 仍为 `0.9000`，MRR 降至 `0.5250`。这说明当前确定性评测集没有证明 BM25 融合带来增益，测试用 Reranker 也未改善排序，不能据此宣称检索效果提升。
-
-Tool 与 E2E 用例现在通过真实 `CustomerAgentRuntime → TurnEngine → DomainAgentRuntime → ToolRegistry` 执行。`citation_precision` 和 `faithfulness_rate` 仍是确定性 fixture 上的证据覆盖指标，不等价于真实模型回答的语义忠实度。
-
-`data/eval/baseline_comparison.json` 的 `comparison_type` 为 `synthetic_or_legacy_rules`。该文件仅用于本地回归对照，不是真实线上基线，也不能用于宣称生产效果或线上提升。
+Tool 与 E2E 用例通过 `CustomerAgentRuntime → TurnEngine → DomainAgentRuntime → ToolRegistry` 执行，但默认仍使用确定性 Mock Tool、Fake Dense/Reranker 与固定语料。因此报告仅用于本地代码和契约回归，不可用于宣称真实模型、真实知识库或线上业务效果。

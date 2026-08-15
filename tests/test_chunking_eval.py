@@ -7,7 +7,7 @@ def test_chunking_eval_runs_real_pipeline():
     report = run_chunking_eval(chunk_size=128, chunk_overlap=16)
 
     assert report.document_count == 6
-    assert report.case_count == 12
+    assert report.case_count == 80
     assert report.chunk_count >= report.document_count
     assert report.budget_violations == 0
     assert report.max_chunk_tokens <= 128

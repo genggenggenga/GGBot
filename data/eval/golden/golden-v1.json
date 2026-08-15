@@ -1,0 +1,115 @@
+{
+  "version": "golden-v1-candidate",
+  "corpus_version": "corpus-v1",
+  "generated_case_set": "golden_v1",
+  "metadata": {
+    "review_status": "generated_pending_human_calibration",
+    "label_source": "current intent contracts and published evaluation policy",
+    "purpose": "release comparison candidate set; promote only after human review"
+  },
+  "cases": [
+    {
+      "id": "NLU-G-001",
+      "category": "intent",
+      "message": "退款 ORD-1001",
+      "expected_intent": "refund_request",
+      "expected_slots": {"order_id": "ORD-1001"},
+      "risk_level": "high"
+    },
+    {
+      "id": "NLU-G-002",
+      "category": "confirmation",
+      "message": "不办了",
+      "current_state": {"active_intent": "refund_request", "confirmation_status": "pending"},
+      "expected_act": "reject",
+      "risk_level": "critical"
+    },
+    {
+      "id": "NLU-G-003",
+      "category": "intent",
+      "message": "退款规则是什么",
+      "expected_intent": "refund_policy",
+      "risk_level": "normal"
+    },
+    {
+      "id": "DST-G-001",
+      "category": "correction",
+      "turns": ["退款 ORD-1001", "不对，是 ORD-1002"],
+      "expected_intent": "refund_request",
+      "expected_slots": {"order_id": "ORD-1002"},
+      "risk_level": "high"
+    },
+    {
+      "id": "DST-G-002",
+      "category": "switch",
+      "turns": ["查询订单 ORD-1001", "不查了，改成查物流"],
+      "expected_intent": "logistics_query",
+      "expected_slots": {},
+      "risk_level": "medium"
+    },
+    {
+      "id": "TOOL-G-001",
+      "category": "refund",
+      "turns": ["退款 ORD-1001", "确认"],
+      "expected_tool": "create_refund",
+      "expected_tool_trace": ["query_order", "check_refund_eligibility", "create_refund"],
+      "expected_postconditions": {
+        "refund_created": true,
+        "confirmation_observed": true
+      },
+      "risk_level": "critical"
+    },
+    {
+      "id": "TOOL-G-002",
+      "category": "logistics",
+      "message": "订单 ORD-1002 的快递到哪了",
+      "expected_tool": "track_package",
+      "expected_tool_trace": ["query_order", "track_package"],
+      "risk_level": "medium"
+    },
+    {
+      "id": "E2E-G-001",
+      "category": "clarify",
+      "turns": ["我要申请退款"],
+      "expected_status": "awaiting_user",
+      "forbidden_tools": ["create_refund"],
+      "expected_postconditions": {"refund_created": false},
+      "risk_level": "critical"
+    },
+    {
+      "id": "E2E-G-002",
+      "category": "expired",
+      "turns": ["退款 ORD-EXPIRED"],
+      "expected_status": "completed",
+      "forbidden_tools": ["create_refund"],
+      "expected_postconditions": {"refund_created": false},
+      "risk_level": "high"
+    },
+    {
+      "id": "E2E-G-003",
+      "category": "tool_failure",
+      "turns": ["退款 ORD-1001"],
+      "fail_tools": ["query_order"],
+      "expected_status": "failed",
+      "forbidden_tools": ["create_refund"],
+      "risk_level": "critical"
+    },
+    {
+      "id": "RAG-G-001",
+      "category": "faq",
+      "query": "质量问题退货运费谁承担",
+      "relevant_ids": ["refund-shipping"],
+      "required_evidence_ids": ["refund-shipping"],
+      "must_abstain": false,
+      "risk_level": "medium"
+    },
+    {
+      "id": "RAG-G-002",
+      "category": "no_answer",
+      "query": "火星配送需要多少天",
+      "relevant_ids": [],
+      "must_abstain": true,
+      "risk_level": "medium"
+    }
+  ]
+}

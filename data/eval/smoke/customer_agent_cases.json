@@ -1,0 +1,55 @@
+{
+  "version": "smoke-v2",
+  "corpus_version": "corpus-v1",
+  "base_dataset": "../customer_agent_cases.json",
+  "metadata": {
+    "purpose": "fast deterministic regression coverage",
+    "added_case_count": 40
+  },
+  "cases": [
+    {"id":"NLU-S-001","category":"intent","message":"我想申请退款","expected_intent":"refund_request","risk_level":"high"},
+    {"id":"NLU-S-002","category":"intent","message":"退款条件是什么","expected_intent":"refund_policy","risk_level":"medium"},
+    {"id":"NLU-S-003","category":"intent","message":"我要申请退货","expected_intent":"return_request","risk_level":"high"},
+    {"id":"NLU-S-004","category":"intent","message":"撤销订单 ORD-1001","expected_intent":"cancel_order","risk_level":"high"},
+    {"id":"NLU-S-005","category":"intent","message":"帮我查 ORD-1002 物流","expected_intent":"logistics_query","risk_level":"medium"},
+    {"id":"NLU-S-006","category":"intent","message":"帮我查订单 ORD-1001","expected_intent":"order_query","risk_level":"medium"},
+    {"id":"NLU-S-007","category":"confirmation","message":"好的","current_state":{"active_intent":"refund_request","confirmation_status":"pending"},"expected_act":"confirm","risk_level":"critical"},
+    {"id":"NLU-S-008","category":"confirmation","message":"不要了","current_state":{"active_intent":"refund_request","confirmation_status":"pending"},"expected_act":"reject","risk_level":"critical"},
+
+    {"id":"DST-S-001","category":"slot_fill","turns":["我想申请退款","订单号 ORD-1001"],"expected_intent":"refund_request","expected_slots":{"order_id":"ORD-1001"},"risk_level":"high"},
+    {"id":"DST-S-002","category":"slot_fill","turns":["帮我查物流","订单号 ORD-1002"],"expected_intent":"logistics_query","expected_slots":{"order_id":"ORD-1002"},"risk_level":"medium"},
+    {"id":"DST-S-003","category":"slot_fill","turns":["查询订单","订单号 ORD-1002"],"expected_intent":"order_query","expected_slots":{"order_id":"ORD-1002"},"risk_level":"medium"},
+    {"id":"DST-S-004","category":"correction","turns":["退款 ORD-1001","更正为 ORD-1002"],"expected_intent":"refund_request","expected_slots":{"order_id":"ORD-1002"},"risk_level":"high"},
+    {"id":"DST-S-005","category":"switch","turns":["查询订单 ORD-1001","改为申请退款"],"expected_intent":"refund_request","expected_slots":{"order_id":"ORD-1001"},"risk_level":"high"},
+    {"id":"DST-S-006","category":"slot_fill","turns":["我要退货","订单号 ORD-1001"],"expected_intent":"return_request","expected_slots":{"order_id":"ORD-1001"},"risk_level":"high"},
+    {"id":"DST-S-007","category":"slot_fill","turns":["取消订单","ORD-1001"],"expected_intent":"cancel_order","expected_slots":{"order_id":"ORD-1001"},"risk_level":"high"},
+    {"id":"DST-S-008","category":"reject","turns":["退款 ORD-1001","不要了"],"expected_intent":"refund_request","expected_slots":{"order_id":"ORD-1001"},"risk_level":"critical"},
+
+    {"id":"TOOL-S-001","category":"order","message":"帮我查订单 ORD-1001","expected_tool":"query_order","expected_params":{"order_id":"ORD-1001"},"risk_level":"medium"},
+    {"id":"TOOL-S-002","category":"logistics","message":"ORD-1002 快递状态","expected_tool":"track_package","expected_params":{"order_id":"ORD-1002"},"risk_level":"medium"},
+    {"id":"TOOL-S-003","category":"refund","turns":["提交 ORD-1001 退款","确认"],"expected_tool":"create_refund","expected_params":{"order_id":"ORD-1001"},"expected_tool_trace":["query_order","check_refund_eligibility","create_refund"],"expected_postconditions":{"refund_created":true,"confirmation_observed":true},"risk_level":"critical"},
+    {"id":"TOOL-S-004","category":"handoff","turns":["我要投诉，转人工客服","确认"],"expected_tool":"create_ticket","expected_params":{"subject":"用户投诉"},"expected_postconditions":{"ticket_created":true,"confirmation_observed":true},"risk_level":"high"},
+    {"id":"TOOL-S-005","category":"rag","message":"退款规则是什么","expected_tool":"rag_search","risk_level":"medium"},
+    {"id":"TOOL-S-006","category":"order","message":"查询 ORD-9999","expected_tool":"query_order","expected_params":{"order_id":"ORD-9999"},"risk_level":"medium"},
+    {"id":"TOOL-S-007","category":"logistics","message":"查询 ORD-1001 配送进度","expected_tool":"track_package","expected_params":{"order_id":"ORD-1001"},"risk_level":"medium"},
+    {"id":"TOOL-S-008","category":"failure","message":"查询 ORD-1001 订单","expected_tool":"query_order","expected_params":{"order_id":"ORD-1001"},"fail_tools":["query_order"],"risk_level":"high"},
+
+    {"id":"RAG-S-001","category":"faq","query":"退款条件","relevant_ids":["refund-window"],"required_evidence_ids":["refund-window"],"risk_level":"medium"},
+    {"id":"RAG-S-002","category":"faq","query":"退货运费谁承担","relevant_ids":["refund-shipping"],"required_evidence_ids":["refund-shipping"],"risk_level":"medium"},
+    {"id":"RAG-S-003","category":"exact","query":"ERROR-401 如何解决","relevant_ids":["error-401"],"required_evidence_ids":["error-401"],"risk_level":"medium"},
+    {"id":"RAG-S-004","category":"exact","query":"ERROR-500 怎么办","relevant_ids":["error-500"],"required_evidence_ids":["error-500"],"risk_level":"medium"},
+    {"id":"RAG-S-005","category":"faq","query":"金卡有什么优惠","relevant_ids":["membership-gold"],"required_evidence_ids":["membership-gold"],"risk_level":"normal"},
+    {"id":"RAG-S-006","category":"faq","query":"加急配送收费吗","relevant_ids":["delivery-express"],"required_evidence_ids":["delivery-express"],"risk_level":"normal"},
+    {"id":"RAG-S-007","category":"faq","query":"物流多久更新一次","relevant_ids":["logistics-update"],"required_evidence_ids":["logistics-update"],"risk_level":"normal"},
+    {"id":"RAG-S-008","category":"no_answer","query":"月球配送政策","relevant_ids":[],"must_abstain":true,"risk_level":"high"},
+
+    {"id":"E2E-S-001","category":"confirmation_gate","turns":["退款 ORD-1001"],"expected_status":"awaiting_user","forbidden_tools":["create_refund"],"expected_postconditions":{"refund_created":false},"risk_level":"critical"},
+    {"id":"E2E-S-002","category":"refund_success","turns":["退款 ORD-1001","确认"],"expected_status":"completed","expected_tool_trace":["query_order","check_refund_eligibility","create_refund"],"expected_postconditions":{"refund_created":true,"confirmation_observed":true},"risk_level":"critical"},
+    {"id":"E2E-S-003","category":"reject_safety","turns":["退款 ORD-1001","不要了"],"expected_status":"completed","forbidden_tools":["create_refund"],"expected_postconditions":{"refund_created":false},"risk_level":"critical"},
+    {"id":"E2E-S-004","category":"expired","turns":["退款 ORD-EXPIRED"],"expected_status":"completed","forbidden_tools":["create_refund"],"expected_postconditions":{"refund_created":false},"risk_level":"high"},
+    {"id":"E2E-S-005","category":"not_found","turns":["退款 ORD-9999"],"expected_status":"completed","forbidden_tools":["create_refund"],"expected_postconditions":{"refund_created":false},"risk_level":"high"},
+    {"id":"E2E-S-006","category":"order","turns":["帮我查订单 ORD-1001"],"expected_status":"completed","risk_level":"medium"},
+    {"id":"E2E-S-007","category":"logistics","turns":["帮我查 ORD-1002 物流"],"expected_status":"completed","risk_level":"medium"},
+    {"id":"E2E-S-008","category":"tool_failure","turns":["退款 ORD-1001"],"fail_tools":["query_order"],"expected_status":"failed","forbidden_tools":["create_refund"],"risk_level":"critical"}
+  ]
+}

@@ -17,8 +17,9 @@ from rag.tokenization import count_tokens
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _DEFAULT_CASES = _ROOT / "data" / "eval" / "rag_chunking_cases.json"
-_DEFAULT_JSON_REPORT = _ROOT / "data" / "eval" / "chunking_eval_report.json"
-_DEFAULT_MD_REPORT = _ROOT / "data" / "eval" / "chunking_eval_report.md"
+_REPORTS_DIR = _ROOT / "data" / "eval" / "reports"
+_DEFAULT_JSON_REPORT = _REPORTS_DIR / "chunking.json"
+_DEFAULT_MD_REPORT = _REPORTS_DIR / "chunking.md"
 
 
 @dataclass
@@ -74,13 +75,23 @@ def run_chunking_eval(
     if top_k < 1:
         raise ValueError("top_k must be positive")
     payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+    cases = list(payload["cases"])
+    if payload.get("generated_case_set") == "chunking_v1":
+        from evaluation.chunking_expansion import build_chunking_v1_expansion
+
+        cases.extend(build_chunking_v1_expansion(cases))
+    elif payload.get("generated_case_set"):
+        raise ValueError(
+            f"unsupported chunking generated case set: "
+            f"{payload['generated_case_set']!r}"
+        )
     chunks = _load_chunks(payload["documents"], config)
     index = BM25Index()
     index.add(chunks)
 
     results = [
         _evaluate_case(case, chunks, index, top_k)
-        for case in payload["cases"]
+        for case in cases
     ]
     ranks = [result.rank for result in results if result.rank is not None]
     section_cases = [
@@ -217,6 +228,8 @@ def write_reports(
     json_path: pathlib.Path = _DEFAULT_JSON_REPORT,
     markdown_path: pathlib.Path = _DEFAULT_MD_REPORT,
 ) -> None:
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(
         json.dumps(asdict(report), ensure_ascii=False, indent=2),
         encoding="utf-8",

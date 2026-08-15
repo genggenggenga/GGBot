@@ -652,8 +652,11 @@ class PublishVersionInput(BaseModel):
 
 
 class EvalRunInput(BaseModel):
-    """评测请求。仅支持当前 CustomerAgentRuntime。"""
+    """Versioned evaluation request for the current CustomerAgentRuntime."""
     mode: str = "customer_agent"
+    suite: str = "smoke"
+    execution_mode: str = "deterministic"
+    judge: bool = False
 
 
 @app.post("/knowledge/add", tags=["知识库"])
@@ -847,13 +850,52 @@ async def revoke_knowledge_version(
 @app.post("/eval/run")
 async def run_eval(body: Optional[EvalRunInput] = None):
     """运行内置评测用例，返回评测报告。"""
-    if body is not None and body.mode != "customer_agent":
+    body = body or EvalRunInput()
+    if body.mode not in {"customer_agent", "deterministic"}:
         raise HTTPException(400, f"不支持的评测模式: {body.mode}")
+    if body.suite not in {"smoke", "golden", "bad_cases"}:
+        raise HTTPException(400, f"不支持的评测集: {body.suite}")
+    if body.execution_mode != "deterministic":
+        raise HTTPException(
+            400,
+            "API 仅运行 deterministic 评测；realistic 模式需要受控离线环境。",
+        )
     from evaluation.local_eval_runner import run_local_eval
 
-    report = await run_local_eval()
+    judge = None
+    if body.judge:
+        from evaluation.judge import LLMJudge
+
+        try:
+            cfg = _anthropic_cfg()
+        except RuntimeError as ex:
+            raise HTTPException(400, str(ex)) from ex
+        judge = LLMJudge.from_api_key(
+            cfg["api_key"],
+            cfg["model"],
+            cfg.get("base_url"),
+        )
+    if (
+        body.suite == "smoke"
+        and body.execution_mode == "deterministic"
+        and judge is None
+    ):
+        report = await run_local_eval()
+    else:
+        report = await run_local_eval(
+            suite=body.suite,
+            execution_mode=body.execution_mode,
+            judge=judge,
+        )
     return {
         "mode": "customer_agent",
+        "suite": getattr(report, "suite", body.suite),
+        "execution_mode": getattr(
+            report,
+            "execution_mode",
+            body.execution_mode,
+        ),
+        "dataset": getattr(report, "dataset", {}),
         "generated_at": report.generated_at,
         "reproduce_command": report.reproduce_command,
         "sample_size": report.sample_size,

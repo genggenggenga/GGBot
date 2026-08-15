@@ -1,5 +1,8 @@
 {
   "description": "GGBot Chunking 黄金评测集：使用客服政策原文验证解析、切片、证据完整性和 BM25 可检索性。",
+  "version": "chunking-v1-candidate",
+  "generated_case_set": "chunking_v1",
+  "review_status": "generated_pending_human_calibration",
   "documents": [
     {
       "doc_id": "refund-policy-v2",

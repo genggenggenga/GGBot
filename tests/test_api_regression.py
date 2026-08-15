@@ -273,6 +273,31 @@ def test_eval_default_mode_uses_customer_agent_runner(monkeypatch):
     assert result["summary"]["task_completion_rate"] == 1.0
 
 
+def test_eval_accepts_versioned_suite(monkeypatch):
+    received = {}
+
+    async def fake_run_local_eval(**kwargs):
+        received.update(kwargs)
+        return SimpleNamespace(
+            generated_at="2026-08-16T00:00:00+00:00",
+            reproduce_command="test",
+            sample_size=12,
+            summary={"unsafe_action_rate": 0.0},
+            suite="golden",
+            execution_mode="deterministic",
+            dataset={"version": "golden-v1-candidate"},
+        )
+
+    monkeypatch.setattr(
+        "evaluation.local_eval_runner.run_local_eval",
+        fake_run_local_eval,
+    )
+    result = run(api_main.run_eval(api_main.EvalRunInput(suite="golden")))
+
+    assert received["suite"] == "golden"
+    assert result["dataset"]["version"] == "golden-v1-candidate"
+
+
 def test_search_uses_hybrid_knowledge_runtime(monkeypatch):
     class Retrieval:
         def model_dump(self, mode):

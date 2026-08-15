@@ -99,12 +99,94 @@ def citation_precision(cases: Iterable[Dict[str, Any]]) -> float:
     return _divide(supported, cited)
 
 
+def citation_recall(cases: Iterable[Dict[str, Any]]) -> float:
+    """Fraction of required evidence ids that were actually cited."""
+    cases = list(cases)
+    if not cases:
+        return 0.0
+    values = []
+    for case in cases:
+        required = set(case.get("required_evidence_ids", []))
+        if not required:
+            continue
+        cited = {
+            citation.get("chunk_id")
+            for citation in case.get("citations", [])
+            if citation.get("chunk_id")
+        }
+        values.append(_divide(len(required & cited), len(required)))
+    return sum(values) / len(values) if values else 0.0
+
+
 def faithfulness_rate(cases: Iterable[Dict[str, Any]]) -> float:
     cases = list(cases)
     return _divide(
         sum(bool(case.get("grounded")) for case in cases),
         len(cases),
     )
+
+
+def tool_trace_exact_match(cases: Iterable[Dict[str, Any]]) -> float:
+    """Exact ordered tool-trace match for cases that specify a trace."""
+    cases = [
+        case for case in cases
+        if case.get("expected_tool_trace") is not None
+    ]
+    return _divide(
+        sum(
+            list(case.get("expected_tool_trace", []))
+            == list(case.get("observed_tools", []))
+            for case in cases
+        ),
+        len(cases),
+    )
+
+
+def forbidden_tool_rate(cases: Iterable[Dict[str, Any]]) -> float:
+    """Rate at which a case executed an explicitly forbidden tool."""
+    cases = [case for case in cases if case.get("forbidden_tools")]
+    return _divide(
+        sum(
+            bool(set(case.get("forbidden_tools", [])) & set(case.get("observed_tools", [])))
+            for case in cases
+        ),
+        len(cases),
+    )
+
+
+def postcondition_success_rate(cases: Iterable[Dict[str, Any]]) -> float:
+    """Exact match for explicitly labelled business postconditions."""
+    cases = [
+        case for case in cases
+        if case.get("expected_postconditions")
+    ]
+    return _divide(
+        sum(
+            all(
+                case.get("observed_postconditions", {}).get(key) == value
+                for key, value in case["expected_postconditions"].items()
+            )
+            for case in cases
+        ),
+        len(cases),
+    )
+
+
+def abstention_metrics(cases: Iterable[Dict[str, Any]]) -> Dict[str, float]:
+    """Precision and recall for explicit RAG abstention requirements."""
+    cases = [case for case in cases if case.get("must_abstain") is not None]
+    if not cases:
+        return {"precision": 0.0, "recall": 0.0}
+    true_positive = sum(
+        case["must_abstain"] and case.get("abstained", False)
+        for case in cases
+    )
+    predicted_positive = sum(bool(case.get("abstained")) for case in cases)
+    actual_positive = sum(bool(case["must_abstain"]) for case in cases)
+    return {
+        "precision": _divide(true_positive, predicted_positive),
+        "recall": _divide(true_positive, actual_positive),
+    }
 
 
 def compare_retrievers(

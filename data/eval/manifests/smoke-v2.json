@@ -1,0 +1,15 @@
+{
+  "dataset_version": "smoke-v2",
+  "corpus_version": "corpus-v1",
+  "dataset": "data/eval/smoke/customer_agent_cases.json",
+  "base_dataset": "data/eval/customer_agent_cases.json",
+  "case_count": 90,
+  "coverage": {
+    "NLU": 18,
+    "DST": 18,
+    "TOOL": 18,
+    "RAG": 18,
+    "E2E": 18
+  },
+  "execution": "deterministic CI regression"
+}

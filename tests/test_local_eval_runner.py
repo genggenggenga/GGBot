@@ -114,8 +114,8 @@ class TestRunLocalEval:
     async def test_produces_report(self, seed_chunks):
         report = await run_local_eval(rag_mode="hybrid", seed_chunks=seed_chunks)
         assert isinstance(report, EvalReport)
-        assert report.sample_size == 50
-        assert len(report.per_case) == 50
+        assert report.sample_size == 90
+        assert len(report.per_case) == 90
         assert "intent_accuracy" in report.summary
         assert "intent_macro_f1" in report.summary
         assert "user_act_accuracy" in report.summary
@@ -133,16 +133,17 @@ class TestRunLocalEval:
 
     @pytest.mark.asyncio
     async def test_each_input_case_runs_once_in_source_order(self, seed_chunks):
-        source_path = pathlib.Path("data/eval/customer_agent_cases.json")
-        source_cases = json.loads(source_path.read_text(encoding="utf-8"))
+        from evaluation.datasets import load_dataset
+
+        source_cases = load_dataset("smoke").cases
 
         report = await run_local_eval(rag_mode="hybrid", seed_chunks=seed_chunks)
         result_ids = [case["case_id"] for case in report.per_case]
-        source_ids = [case["id"] for case in source_cases]
+        source_ids = [case.id for case in source_cases]
 
-        assert report.sample_size == len(source_cases) == 50
+        assert report.sample_size == len(source_cases) == 90
         assert result_ids == source_ids
-        assert len(result_ids) == len(set(result_ids)) == 50
+        assert len(result_ids) == len(set(result_ids)) == 90
 
     @pytest.mark.asyncio
     async def test_intent_accuracy_above_threshold(self, seed_chunks):
@@ -186,7 +187,7 @@ class TestAblation:
         ablation = await run_ablation()
         assert set(ablation.keys()) == {"dense", "hybrid", "rerank"}
         for mode, report in ablation.items():
-            assert report.sample_size == 50
+            assert report.sample_size == 90
             assert "intent_accuracy" in report.summary
 
     @pytest.mark.asyncio
@@ -239,7 +240,7 @@ class TestBaselineComparison:
         assert "current_task_completion_rate" in comparison
         assert "rate_difference" in comparison
         assert "improvement" not in comparison
-        assert comparison["e2e_sample_size"] == 10
+        assert comparison["e2e_sample_size"] == 18
 
 
 class TestReportWriting:

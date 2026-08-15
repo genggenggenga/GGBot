@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from evaluation.datasets import dataset_summary, load_dataset
 from core.agent_models import (
     ConfirmationStatus,
     DialogueState,
@@ -38,7 +39,9 @@ from rag.models import DocumentChunk
 logger = logging.getLogger(__name__)
 
 _EVAL_DIR = pathlib.Path(__file__).parent.parent / "data" / "eval"
+_REPORTS_DIR = _EVAL_DIR / "reports"
 _CASES_FILE = _EVAL_DIR / "customer_agent_cases.json"
+_CORPUS_FILE = _EVAL_DIR / "knowledge" / "corpus-v1.json"
 _EVAL_DATE = date(2026, 8, 7)
 
 
@@ -212,13 +215,21 @@ def _build_tool_registry(
     ]:
         def wrap(tool_name, tool_handler):
             async def recorded(params, context):
-                call_log.append({
+                entry = {
                     "tool": tool_name,
                     "params": dict(params),
-                })
+                }
+                call_log.append(entry)
                 if tool_name in fail_tools:
+                    entry["error"] = f"forced failure: {tool_name}"
                     raise RuntimeError(f"forced failure: {tool_name}")
-                return await tool_handler(params, context)
+                try:
+                    data = await tool_handler(params, context)
+                    entry["data"] = data
+                    return data
+                except Exception as ex:
+                    entry["error"] = str(ex)
+                    raise
 
             return recorded
 
@@ -329,6 +340,7 @@ def _build_eval_runtime(
 class CaseResult:
     case_id: str
     category: str
+    risk_level: str = "normal"
     predicted_intent: Optional[str] = None
     expected_intent: Optional[str] = None
     predicted_tool: Optional[str] = None
@@ -339,10 +351,20 @@ class CaseResult:
     expected_act: Optional[str] = None
     predicted_status: Optional[str] = None
     expected_status: Optional[str] = None
+    predicted_response: Optional[str] = None
     dialogue_state: Optional[Dict[str, Any]] = None
     observed_tools: List[str] = field(default_factory=list)
+    observed_tool_results: List[Dict[str, Any]] = field(default_factory=list)
+    expected_tool_trace: Optional[List[str]] = None
+    forbidden_tools: List[str] = field(default_factory=list)
+    expected_postconditions: Dict[str, Any] = field(default_factory=dict)
+    observed_postconditions: Dict[str, Any] = field(default_factory=dict)
+    required_evidence_ids: List[str] = field(default_factory=list)
     citations: List[Dict[str, Any]] = field(default_factory=list)
     grounded: Optional[bool] = None
+    must_abstain: Optional[bool] = None
+    abstained: Optional[bool] = None
+    judge_scores: Optional[Dict[str, Any]] = None
     completed: bool = False
     error: Optional[str] = None
 
@@ -372,6 +394,7 @@ async def _execute_dst_case(
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
+        risk_level=case.get("risk_level", "normal"),
         predicted_intent=last_intent,
         expected_intent=case.get("expected_intent"),
         predicted_slots=last_slots,
@@ -397,8 +420,20 @@ async def _execute_tool_case(
     turns = case.get("turns") or [case.get("message", "")]
     result = None
     conv_id = f"eval-{case['id']}"
-    for turn in turns:
+    confirmation_seen = False
+    for turn_index, turn in enumerate(turns):
+        is_confirmation = (
+            _nlu_fast(
+                turn,
+                {"confirmation_status": "pending"},
+            ).user_act.value == "confirm"
+        )
+        start = len(calls)
         result = await runtime.run("eval-user", conv_id, turn)
+        for call in calls[start:]:
+            call["turn_index"] = turn_index
+            call["confirmation_before_write"] = confirmation_seen or is_confirmation
+        confirmation_seen = confirmation_seen or is_confirmation
 
     state = await store.load("eval-user", conv_id)
     observed_tools = [item["tool"] for item in calls]
@@ -422,14 +457,21 @@ async def _execute_tool_case(
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
+        risk_level=case.get("risk_level", "normal"),
         predicted_intent=result.intent if result else None,
         predicted_tool=predicted_tool,
         expected_tool=expected_tool,
         predicted_slots=predicted_params,
         expected_slots=expected_params,
         predicted_status=result.status if result else None,
+        predicted_response=result.response if result else None,
         dialogue_state=state.model_dump(mode="json") if state else None,
         observed_tools=observed_tools,
+        observed_tool_results=calls,
+        expected_tool_trace=case.get("expected_tool_trace"),
+        forbidden_tools=list(case.get("forbidden_tools", [])),
+        expected_postconditions=dict(case.get("expected_postconditions", {})),
+        observed_postconditions=_derive_postconditions(calls),
         completed=True,
     )
 
@@ -468,9 +510,13 @@ async def _execute_rag_case(
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
+        risk_level=case.get("risk_level", "normal"),
         predicted_slots={"ranked_ids": ranked_ids, "relevant_ids": list(relevant_ids)},
+        required_evidence_ids=list(case.get("required_evidence_ids", relevant_ids)),
         citations=citations,
         grounded=grounded,
+        must_abstain=case.get("must_abstain"),
+        abstained=not result.answered,
         completed=True,
     )
 
@@ -490,8 +536,20 @@ async def _execute_e2e_case(
     )
     conv_id = f"eval-{case['id']}"
     result = None
-    for turn_text in case.get("turns", []):
+    confirmation_seen = False
+    for turn_index, turn_text in enumerate(case.get("turns", [])):
+        is_confirmation = (
+            _nlu_fast(
+                turn_text,
+                {"confirmation_status": "pending"},
+            ).user_act.value == "confirm"
+        )
+        start = len(calls)
         result = await runtime.run("eval-user", conv_id, turn_text)
+        for call in calls[start:]:
+            call["turn_index"] = turn_index
+            call["confirmation_before_write"] = confirmation_seen or is_confirmation
+        confirmation_seen = confirmation_seen or is_confirmation
 
     expected_status = case.get("expected_status", "completed")
     predicted_status = result.status if result else None
@@ -501,14 +559,21 @@ async def _execute_e2e_case(
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
+        risk_level=case.get("risk_level", "normal"),
         predicted_status=predicted_status,
         expected_status=expected_status,
+        predicted_response=result.response if result else None,
         predicted_intent=result.intent if result else None,
         expected_intent=case.get("expected_intent"),
         predicted_slots=dict(state.slots) if state else {},
         expected_slots=dict(case.get("expected_slots", {})),
         dialogue_state=state.model_dump(mode="json") if state else None,
         observed_tools=[item["tool"] for item in calls],
+        observed_tool_results=calls,
+        expected_tool_trace=case.get("expected_tool_trace"),
+        forbidden_tools=list(case.get("forbidden_tools", [])),
+        expected_postconditions=dict(case.get("expected_postconditions", {})),
+        observed_postconditions=_derive_postconditions(calls),
         citations=list(result.citations) if result else [],
         completed=completed,
     )
@@ -524,6 +589,7 @@ async def _execute_nlu_case(
     return CaseResult(
         case_id=case["id"],
         category=case["category"],
+        risk_level=case.get("risk_level", "normal"),
         predicted_intent=understanding.primary_intent,
         expected_intent=case.get("expected_intent"),
         predicted_act=understanding.user_act.value,
@@ -534,17 +600,44 @@ async def _execute_nlu_case(
     )
 
 
+def _derive_postconditions(
+    calls: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Derive stable business assertions from recorded deterministic tools."""
+    values: Dict[str, Any] = {
+        "confirmation_observed": any(
+            call["tool"] in {"create_refund", "create_ticket"}
+            and call.get("confirmation_before_write") is True
+            for call in calls
+        ),
+        "refund_created": False,
+        "ticket_created": False,
+    }
+    for call in calls:
+        data = call.get("data") or {}
+        if call["tool"] == "create_refund" and data.get("created") is True:
+            values["refund_created"] = True
+        if call["tool"] == "create_ticket" and data.get("created") is True:
+            values["ticket_created"] = True
+    return values
+
+
 # ── Metrics computation ─────────────────────────────────────────────────────
 
 from evaluation.agent_metrics import (
+    abstention_metrics,
     citation_precision,
+    citation_recall,
     faithfulness_rate,
+    forbidden_tool_rate,
     joint_goal_accuracy,
     mean_reciprocal_rank,
+    postcondition_success_rate,
     recall_at_k,
     slot_f1,
     task_completion_rate,
     tool_call_accuracy,
+    tool_trace_exact_match,
 )
 
 
@@ -623,7 +716,10 @@ def _compute_all_metrics(
     tcr = task_completion_rate(completion_data) if e2e_cases else 0.0
 
     citation_cases = [
-        {"citations": result.citations}
+        {
+            "citations": result.citations,
+            "required_evidence_ids": result.required_evidence_ids,
+        }
         for result in rag_cases
     ]
     grounded_cases = [
@@ -631,7 +727,65 @@ def _compute_all_metrics(
         for result in rag_cases
     ]
     citation_prec = citation_precision(citation_cases)
+    citation_rec = citation_recall(citation_cases)
     faith = faithfulness_rate(grounded_cases)
+    workflow_cases = [
+        {
+            "expected_tool_trace": result.expected_tool_trace,
+            "observed_tools": result.observed_tools,
+            "forbidden_tools": result.forbidden_tools,
+            "expected_postconditions": result.expected_postconditions,
+            "observed_postconditions": result.observed_postconditions,
+        }
+        for result in tool_cases + e2e_cases
+    ]
+    trace_cases = [
+        case for case in workflow_cases
+        if case["expected_tool_trace"] is not None
+    ]
+    safety_cases = [
+        case for case in workflow_cases
+        if case["forbidden_tools"]
+    ]
+    postcondition_cases = [
+        case for case in workflow_cases
+        if case["expected_postconditions"]
+    ]
+    abstention_cases = [
+        result for result in rag_cases
+        if result.must_abstain is not None
+    ]
+    forbidden_rate = forbidden_tool_rate(workflow_cases)
+    abstention = abstention_metrics([
+        {
+            "must_abstain": result.must_abstain,
+            "abstained": result.abstained,
+        }
+        for result in rag_cases
+    ])
+    judged = [
+        result.judge_scores for result in (
+            tool_cases + e2e_cases
+        ) if result.judge_scores and not result.judge_scores.get("judge_failed")
+    ]
+    judge_summary: Dict[str, Any] = {}
+    if judged:
+        judge_summary = {
+            f"judge_{field}": round(
+                sum(float(scores[field]) for scores in judged) / len(judged),
+                4,
+            )
+            for field in (
+                "relevance",
+                "accuracy",
+                "completeness",
+                "helpfulness",
+                "safety",
+                "groundedness",
+                "overall",
+            )
+        }
+        judge_summary["judge_sample_size"] = len(judged)
 
     return {
         "intent_accuracy": intent_metrics["accuracy"],
@@ -647,9 +801,21 @@ def _compute_all_metrics(
         "tool_parameter_accuracy": tool_metrics["parameter_accuracy"],
         "task_completion_rate": round(tcr, 4),
         "citation_precision": citation_prec,
+        "citation_recall": citation_rec,
         "faithfulness_rate": faith,
+        "tool_trace_exact_match": tool_trace_exact_match(workflow_cases),
+        "tool_trace_sample_size": len(trace_cases),
+        "unsafe_action_rate": forbidden_rate,
+        "confirmation_safety_rate": round(1.0 - forbidden_rate, 4),
+        "confirmation_safety_sample_size": len(safety_cases),
+        "postcondition_success_rate": postcondition_success_rate(workflow_cases),
+        "postcondition_sample_size": len(postcondition_cases),
+        "abstention_precision": abstention["precision"],
+        "abstention_recall": abstention["recall"],
+        "abstention_sample_size": len(abstention_cases),
         "intent_detail": intent_metrics,
         "slot_detail": slot_metrics,
+        **judge_summary,
     }
 
 
@@ -661,6 +827,9 @@ class EvalReport:
     reproduce_command: str
     sample_size: int
     summary: Dict[str, Any]
+    suite: str = "smoke"
+    dataset: Dict[str, Any] = field(default_factory=dict)
+    execution_mode: str = "deterministic"
     per_mode: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     per_case: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -668,8 +837,22 @@ class EvalReport:
 async def run_local_eval(
     rag_mode: str = "hybrid",
     seed_chunks: Optional[Sequence[Any]] = None,
+    *,
+    suite: str = "smoke",
+    dataset_path: Optional[pathlib.Path] = None,
+    execution_mode: str = "deterministic",
+    judge: Optional[Any] = None,
 ) -> EvalReport:
-    """Run the full evaluation on the 50 fixed cases."""
+    """Run a versioned suite with deterministic local dependencies.
+
+    ``realistic`` executions need externally injected real components and are
+    intentionally not silently substituted with fake models here.
+    """
+    if execution_mode != "deterministic":
+        raise ValueError(
+            "local_eval_runner only supports deterministic mode; "
+            "use the realistic evaluation harness with injected components"
+        )
     tracker = DialogueStateTracker()
 
     from rag.retriever import HybridRetriever
@@ -686,7 +869,8 @@ async def run_local_eval(
         dense, sparse, reranker=reranker, relevance_threshold=0.0,
     )
 
-    cases = json.loads(_CASES_FILE.read_text(encoding="utf-8"))
+    dataset = load_dataset(suite, path=dataset_path)
+    cases = [case.raw() for case in dataset.cases]
 
     all_results: Dict[str, List[CaseResult]] = {
         "dst": [], "tool": [], "rag": [], "e2e": [], "nlu": [],
@@ -716,6 +900,17 @@ async def run_local_eval(
             raise ValueError(f"unsupported evaluation case id: {case_id!r}")
         bucket, executor = executors[prefix]
         result = await executor(case)
+        if judge is not None and result.predicted_response:
+            from evaluation.judge import JudgeInput
+
+            scores = await judge.judge(JudgeInput(
+                user_question=case.get("turns", [case.get("message", "")])[-1],
+                candidate_response=result.predicted_response,
+                tool_observations=result.observed_tool_results,
+                evidence=result.citations,
+                expected_behavior=case.get("expected_status"),
+            ))
+            result.judge_scores = scores.model_dump()
         all_results[bucket].append(result)
         per_case.append(asdict(result))
 
@@ -723,9 +918,15 @@ async def run_local_eval(
 
     return EvalReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
-        reproduce_command=".venv/bin/python -m evaluation.local_eval_runner",
+        reproduce_command=(
+            ".venv/bin/python -m evaluation.run "
+            f"--suite {suite} --mode {execution_mode}"
+        ),
         sample_size=len(cases),
         summary=summary,
+        suite=suite,
+        dataset=dataset_summary(dataset),
+        execution_mode=execution_mode,
         per_case=per_case,
     )
 
@@ -735,7 +936,11 @@ async def run_ablation() -> Dict[str, EvalReport]:
     seed = _default_seed_chunks()
     results: Dict[str, EvalReport] = {}
     for mode in ("dense", "hybrid", "rerank"):
-        report = await run_local_eval(rag_mode=mode, seed_chunks=seed)
+        report = await run_local_eval(
+            rag_mode=mode,
+            seed_chunks=seed,
+            suite="smoke",
+        )
         results[mode] = report
     return results
 
@@ -748,7 +953,7 @@ async def run_baseline_comparison() -> Dict[str, Any]:
     measured before/after improvement.
     """
     from core.agent_models import INTENT_SCHEMAS
-    cases = json.loads(_CASES_FILE.read_text(encoding="utf-8"))
+    cases = [case.raw() for case in load_dataset("smoke").cases]
     e2e_cases = [case for case in cases if case.get("id", "").startswith("E2E-")]
 
     baseline_completed = 0
@@ -782,25 +987,19 @@ async def run_baseline_comparison() -> Dict[str, Any]:
 
 
 def _default_seed_chunks() -> List[DocumentChunk]:
-    """Create seed knowledge chunks for RAG evaluation."""
-    from rag.models import DocumentChunk
-    chunks = []
-    items = [
-        ("refund-window", "退款期限：购买后7天内可申请无理由退款。超过7天需提供质量问题凭证。"),
-        ("refund-shipping", "质量问题退货运费由平台承担，非质量问题退货运费由用户承担。"),
-        ("logistics-update", "物流信息每4小时更新一次，可在订单详情页查看实时状态。"),
-        ("error-401", "ERROR-401：认证失败，请重新登录。如持续出现请联系技术支持。"),
-        ("error-500", "ERROR-500：服务器内部错误，请稍后重试。如持续出现请报告技术团队。"),
-        ("points-expiry", "积分有效期：普通用户积分12个月有效，会员用户积分24个月有效。"),
-        ("membership-gold", "金卡会员折扣：全场商品享受9折优惠，部分特价商品除外。"),
-        ("delivery-express", "加急配送费用：标准配送免费，加急配送加收15元，次日达加收25元。"),
-    ]
-    for idx, (chunk_id, content) in enumerate(items):
+    """Load deterministic chunks from the versioned evaluation corpus."""
+    payload = json.loads(_CORPUS_FILE.read_text(encoding="utf-8"))
+    chunks: List[DocumentChunk] = []
+    for idx, item in enumerate(payload["chunks"]):
         chunks.append(DocumentChunk(
-            chunk_id=chunk_id, content=content,
-            source="knowledge_base", title=chunk_id,
-            section="", chunk_index=idx,
-            parent_id=f"doc-{chunk_id}",
+            chunk_id=item["chunk_id"],
+            content=item["content"],
+            source=f"evaluation:{payload['version']}",
+            title=item.get("title", item["chunk_id"]),
+            section=item.get("section", ""),
+            chunk_index=idx,
+            parent_id=f"doc-{item['chunk_id']}",
+            metadata={"corpus_version": payload["version"]},
         ))
     return chunks
 
@@ -812,6 +1011,9 @@ def write_json_report(report: EvalReport, path: pathlib.Path) -> pathlib.Path:
         "generated_at": report.generated_at,
         "reproduce_command": report.reproduce_command,
         "sample_size": report.sample_size,
+        "suite": report.suite,
+        "dataset": report.dataset,
+        "execution_mode": report.execution_mode,
         "summary": report.summary,
         "per_mode": {k: {"summary": v.summary} for k, v in report.per_mode.items()} if report.per_mode else {},
         "per_case": report.per_case,
@@ -847,13 +1049,14 @@ def write_markdown_report(
     path: Optional[pathlib.Path] = None,
 ) -> pathlib.Path:
     if path is None:
-        path = _EVAL_DIR / "eval_report.md"
+        path = _REPORTS_DIR / "smoke-deterministic.md"
     lines = [
         "# GGBot Evaluation Report",
         "",
         f"- **Generated at**: {report.generated_at}",
         f"- **Reproduce command**: `{report.reproduce_command}`",
         f"- **Sample size**: {report.sample_size}",
+        f"- **Suite / mode**: `{report.suite}` / `{report.execution_mode}`",
         "",
         "## Summary Metrics",
         "",
@@ -897,7 +1100,7 @@ def write_markdown_report(
 async def _main() -> None:
     import sys
     ablation_mode = "--ablation" in sys.argv
-    output_dir = pathlib.Path(_EVAL_DIR)
+    output_dir = _REPORTS_DIR
 
     if ablation_mode:
         ablation = await run_ablation()
