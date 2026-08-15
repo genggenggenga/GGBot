@@ -30,6 +30,7 @@ from rag.query_planner import QueryPlanner
 logger = logging.getLogger(__name__)
 
 KNOWLEDGE_AGENT = "knowledge"
+FALLBACK_AGENT = "fallback"
 ORDER_AGENT = "order"
 LOGISTICS_AGENT = "logistics"
 AFTER_SALES_AGENT = "after_sales"
@@ -114,9 +115,9 @@ class Router:
         "query": KNOWLEDGE_AGENT,
         "technical": KNOWLEDGE_AGENT,
         "account": KNOWLEDGE_AGENT,
-        "greeting": KNOWLEDGE_AGENT,
-        "feedback": KNOWLEDGE_AGENT,
-        "other": KNOWLEDGE_AGENT,
+        "greeting": FALLBACK_AGENT,
+        "feedback": FALLBACK_AGENT,
+        "other": FALLBACK_AGENT,
     }
 
     def route(self, state: DialogueState) -> str:
@@ -934,6 +935,34 @@ class AfterSalesAgent(ServiceAgent):
         )
 
 
+class FallbackAgent:
+    """Deterministic responses for non-domain conversation intents."""
+
+    name = FALLBACK_AGENT
+    allowed_tools = ()
+
+    async def execute(
+        self,
+        state: DialogueState,
+        message: str,
+        *,
+        goal: Optional[str] = None,
+        **_: Any,
+    ) -> AgentResult:
+        intent = goal or state.active_intent
+        responses = {
+            "greeting": "你好，我是 GGBot，可以帮你查询订单、物流，或处理退款相关问题。",
+            "feedback": "感谢你的反馈，我已记录你的意见。",
+            "other": "请说明你需要查询订单、物流，还是咨询退款政策。",
+        }
+        return AgentResult(
+            agent=self.name,
+            success=True,
+            response=responses.get(intent, "请说明你需要处理的具体问题。"),
+            goal=intent,
+        )
+
+
 class KnowledgeAgent:
     """Fixed one-shot RAG agent; it never enters the ReAct loop."""
 
@@ -991,17 +1020,6 @@ class KnowledgeAgent:
             if goal
             else state
         )
-        deterministic = {
-            "greeting": "你好，我可以帮你查询订单、物流，或处理退款相关问题。",
-            "feedback": "感谢你的反馈，我已记录你的意见。",
-            "other": "请说明你需要查询订单、物流，还是咨询退款政策。",
-        }
-        if task_state.active_intent in deterministic:
-            return AgentResult(
-                agent=self.name,
-                success=True,
-                response=deterministic[task_state.active_intent],
-            )
         planner = self._query_planner or QueryPlanner(enabled=False)
         plan = await planner.plan(
             message,

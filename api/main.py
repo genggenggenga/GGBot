@@ -84,6 +84,7 @@ async def _runtime_components(app: FastAPI):
     from agents.domain_agents import (
         AfterSalesAgent,
         DomainAgentRuntime,
+        FallbackAgent,
         KnowledgeAgent,
         LogisticsAgent,
         OrderAgent,
@@ -271,6 +272,7 @@ async def _runtime_components(app: FastAPI):
 
     router = Router()
     domain_runtime = DomainAgentRuntime(router, {
+        "fallback": FallbackAgent(),
         "knowledge": KnowledgeAgent(
             registry,
             query_planner,

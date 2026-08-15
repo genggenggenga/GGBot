@@ -5,11 +5,13 @@ import pytest
 
 from agents.domain_agents import (
     AFTER_SALES_AGENT,
+    FALLBACK_AGENT,
     KNOWLEDGE_AGENT,
     LOGISTICS_AGENT,
     ORDER_AGENT,
     AfterSalesAgent,
     DomainAgentRuntime,
+    FallbackAgent,
     KnowledgeAgent,
     LogisticsAgent,
     OrderAgent,
@@ -69,6 +71,8 @@ def test_router_uses_dialogue_state_and_deduplicates_tasks():
     assert router.route(DialogueState(active_intent="logistics_query")) == LOGISTICS_AGENT
     assert router.route(DialogueState(active_intent="refund_request")) == AFTER_SALES_AGENT
     assert router.route(DialogueState(active_intent="request")) == AFTER_SALES_AGENT
+    assert router.route(DialogueState(active_intent="greeting")) == FALLBACK_AGENT
+    assert router.route(DialogueState(active_intent="other")) == FALLBACK_AGENT
     assert router.route_tasks(
         DialogueState(active_intent="order_query"),
         ["order_query", "logistics_query", "order_query"],
@@ -624,7 +628,7 @@ def test_knowledge_agent_sends_bounded_multi_query_plan_to_rag():
         ("other", "订单、物流"),
     ],
 )
-def test_knowledge_agent_uses_deterministic_responses_without_rag(
+def test_fallback_agent_uses_deterministic_responses_without_rag(
     intent,
     expected_text,
 ):
@@ -637,7 +641,7 @@ def test_knowledge_agent_uses_deterministic_responses_without_rag(
         return {"answered": True, "hits": [{"content": "不应返回"}]}
 
     register_tool(registry, "rag_search", rag_search, required=("query",))
-    result = run(KnowledgeAgent(registry).execute(
+    result = run(FallbackAgent().execute(
         DialogueState(active_intent=intent),
         "测试消息",
     ))
@@ -645,6 +649,15 @@ def test_knowledge_agent_uses_deterministic_responses_without_rag(
     assert result.success
     assert expected_text in result.response
     assert calls == 0
+
+
+def test_greeting_fallback_introduces_ggbot():
+    result = run(FallbackAgent().execute(
+        DialogueState(active_intent="greeting"),
+        "你好",
+    ))
+
+    assert "我是 GGBot" in result.response
 
 
 def test_tool_registry_rejects_domain_agent_overreach():

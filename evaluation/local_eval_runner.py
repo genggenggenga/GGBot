@@ -288,6 +288,7 @@ def _build_eval_runtime(
     from agents.domain_agents import (
         AfterSalesAgent,
         DomainAgentRuntime,
+        FallbackAgent,
         KnowledgeAgent,
         LogisticsAgent,
         OrderAgent,
@@ -305,6 +306,7 @@ def _build_eval_runtime(
     )
     router = Router()
     domain_runtime = DomainAgentRuntime(router, {
+        "fallback": FallbackAgent(),
         "knowledge": KnowledgeAgent(registry),
         "order": OrderAgent(registry),
         "logistics": LogisticsAgent(registry),

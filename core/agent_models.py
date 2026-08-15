@@ -218,18 +218,19 @@ def _intent(
 
 _KNOWLEDGE_AGENT = ("knowledge",)
 _AFTER_SALES_AGENT = ("after_sales",)
+_FALLBACK_AGENT = ("fallback",)
 
 INTENT_SCHEMAS: Mapping[str, IntentSchema] = MappingProxyType({
     "query": _intent("query", _KNOWLEDGE_AGENT, "answer_grounded_in_knowledge"),
     "complaint": _intent("complaint", _AFTER_SALES_AGENT, "handoff_created"),
     "request": _intent("request", _AFTER_SALES_AGENT, "requested_action_completed"),
-    "greeting": _intent("greeting", _KNOWLEDGE_AGENT, "response_generated"),
+    "greeting": _intent("greeting", _FALLBACK_AGENT, "response_generated"),
     "escalation": _intent("escalation", _AFTER_SALES_AGENT, "handoff_created"),
     "technical": _intent("technical", _KNOWLEDGE_AGENT, "answer_grounded_in_knowledge"),
     "billing": _intent("billing", ("knowledge", "after_sales"), "billing_goal_resolved"),
     "account": _intent("account", _KNOWLEDGE_AGENT, "answer_grounded_in_knowledge"),
-    "feedback": _intent("feedback", _KNOWLEDGE_AGENT, "response_generated"),
-    "other": _intent("other", _KNOWLEDGE_AGENT, "response_or_clarification_generated"),
+    "feedback": _intent("feedback", _FALLBACK_AGENT, "response_generated"),
+    "other": _intent("other", _FALLBACK_AGENT, "response_or_clarification_generated"),
     "order_query": _intent(
         "order_query",
         ("order",),

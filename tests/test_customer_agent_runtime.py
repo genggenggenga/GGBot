@@ -3,6 +3,7 @@ import asyncio
 from agents.domain_agents import (
     AfterSalesAgent,
     DomainAgentRuntime,
+    FallbackAgent,
     KnowledgeAgent,
     LogisticsAgent,
     OrderAgent,
@@ -132,6 +133,7 @@ def build_runtime(*, eligible=True, fail_query=False, response_polisher=None):
 
     router = Router()
     domain = DomainAgentRuntime(router, {
+        "fallback": FallbackAgent(),
         "knowledge": KnowledgeAgent(registry),
         "order": OrderAgent(registry),
         "logistics": LogisticsAgent(registry),
