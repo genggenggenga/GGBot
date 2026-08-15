@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from prometheus_client import generate_latest
 
 from core.tool_registry import (
     LocalToolAdapter,
@@ -219,6 +220,30 @@ def test_tool_result_can_convert_to_observation():
     assert observation.name == "query_order"
     assert observation.success is True
     assert observation.data["status"] == "paid"
+
+
+def test_registry_emits_prometheus_tool_metrics():
+    async def handler(params, context):
+        return {"order_id": params["order_id"]}
+
+    registry = ToolRegistry()
+    registry.register(LocalToolAdapter(make_spec(), handler))
+    registry.set_agent_whitelist("order", {"query_order"})
+
+    result = run(
+        registry.call("order", "query_order", {"order_id": "O-metrics"})
+    )
+    metrics = generate_latest().decode()
+
+    assert result.success
+    assert (
+        'ggbot_tool_calls_total{agent="order",cached="false",outcome="success",'
+        'tool="query_order",tool_type="read"}'
+    ) in metrics
+    assert (
+        'ggbot_tool_call_latency_seconds_count{agent="order",cached="false",'
+        'tool="query_order",tool_type="read"}'
+    ) in metrics
 
 
 def test_legacy_tool_manager_remains_importable():

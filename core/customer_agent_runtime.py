@@ -22,6 +22,7 @@ from core.agent_models import (
     get_missing_slots,
 )
 from core.dialogue_state_tracker import DialogueStateTracker
+from core.metrics import record_chat_turn
 from core.response_polisher import ResponsePolisher
 from core.tool_names import logical_tool_name
 from core.trace_store import TraceStore, summarize_observations
@@ -216,7 +217,7 @@ class CustomerAgentRuntime:
         for result in turn_data["results"]:
             self._stats[result.agent].record(result.success, latency_ms)
 
-        return CustomerTurnResult(
+        result = CustomerTurnResult(
             trace_id=trace_id,
             response=completed.response or "抱歉，当前没有得到可用的处理结果。",
             intent=completed.dialogue_state.active_intent or "other",
@@ -231,6 +232,13 @@ class CustomerAgentRuntime:
             missing_slots=list(completed.dialogue_state.missing_slots),
             citations=list(turn_data["citations"]),
         )
+        record_chat_turn(
+            agent=result.agent_type,
+            intent=result.intent,
+            status=result.status,
+            latency_ms=result.latency_ms,
+        )
+        return result
 
     def get_stats(self) -> Dict[str, Dict[str, Any]]:
         """Return main-runtime Agent statistics for monitoring."""

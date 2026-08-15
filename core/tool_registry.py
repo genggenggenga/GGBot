@@ -36,6 +36,7 @@ from typing import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.agent_models import Observation
+from core.metrics import record_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -528,48 +529,59 @@ class ToolRegistry:
         Returns a failed ``ToolResult`` if any check fails; otherwise
         delegates to the ``LocalToolAdapter``.
         """
-        # 1. Tool exists?
+        started = time.monotonic()
         adapter = self._adapters.get(tool_name)
+        spec = adapter.spec if adapter is not None else None
+        result: ToolResult
+
+        # 1. Tool exists?
         if adapter is None:
-            return ToolResult(
+            result = ToolResult(
                 success=False,
                 tool_name=tool_name,
                 error=f"tool not found: {tool_name}",
             )
-
         # 2. Agent whitelist
-        if not self.is_tool_allowed(agent, tool_name):
-            return ToolResult(
+        elif not self.is_tool_allowed(agent, tool_name):
+            result = ToolResult(
                 success=False,
                 tool_name=tool_name,
                 error=f"agent {agent} not allowed to call {tool_name}",
             )
-
         # 3. Write-operation confirmation gate
-        spec = adapter.spec
-        if spec.tool_type == ToolType.WRITE:
-            if action_id is None:
-                return ToolResult(
-                    success=False,
-                    tool_name=tool_name,
-                    error=f"write tool {tool_name} requires action_id for confirmation tracking",
-                )
-            if not self._confirmation_gate.is_confirmed(action_id):
-                self._confirmation_gate.mark_pending(action_id)
-                return ToolResult(
-                    success=False,
-                    tool_name=tool_name,
-                    error=f"write tool {tool_name} action {action_id} not confirmed",
-                )
-
-        # 4. Delegate to adapter
-        result = await adapter.call(params, context, use_cache=use_cache)
-        if (
+        elif spec.tool_type == ToolType.WRITE and action_id is None:
+            result = ToolResult(
+                success=False,
+                tool_name=tool_name,
+                error=f"write tool {tool_name} requires action_id for confirmation tracking",
+            )
+        elif (
             spec.tool_type == ToolType.WRITE
-            and action_id is not None
-            and result.success
+            and not self._confirmation_gate.is_confirmed(action_id)
         ):
-            self._confirmation_gate.complete(action_id)
+            self._confirmation_gate.mark_pending(action_id)
+            result = ToolResult(
+                success=False,
+                tool_name=tool_name,
+                error=f"write tool {tool_name} action {action_id} not confirmed",
+            )
+        else:
+            result = await adapter.call(params, context, use_cache=use_cache)
+            if (
+                spec.tool_type == ToolType.WRITE
+                and action_id is not None
+                and result.success
+            ):
+                self._confirmation_gate.complete(action_id)
+
+        record_tool_call(
+            agent=agent,
+            tool=tool_name,
+            tool_type=(spec.tool_type.value if spec is not None else "unknown"),
+            success=result.success,
+            cached=result.cached,
+            latency_ms=(time.monotonic() - started) * 1000,
+        )
         return result
 
     # ── stats ─────────────────────────────────────────────────────────────────

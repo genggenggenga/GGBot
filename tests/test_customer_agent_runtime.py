@@ -1,5 +1,7 @@
 import asyncio
 
+from prometheus_client import generate_latest
+
 from agents.domain_agents import (
     AfterSalesAgent,
     DomainAgentRuntime,
@@ -183,6 +185,23 @@ def test_refund_flow_clarifies_confirms_and_creates_once():
     stats = runtime.get_stats()
     assert stats["after_sales"]["total"] == 2
     assert stats["after_sales"]["success_rate"] == 1.0
+
+
+def test_runtime_emits_prometheus_turn_metrics():
+    runtime, _, _, _ = build_runtime()
+
+    result = run(runtime.run("user-1", "conv-metrics", "我要退款"))
+    metrics = generate_latest().decode()
+
+    assert (
+        'ggbot_chat_turns_total{agent="after_sales",intent="refund_request",'
+        'status="awaiting_user"}'
+    ) in metrics
+    assert (
+        'ggbot_chat_turn_latency_seconds_count{agent="after_sales",'
+        'intent="refund_request",status="awaiting_user"}'
+    ) in metrics
+    assert result.status == "awaiting_user"
 
 
 def test_runtime_executes_all_structured_intents_and_composes_response():
