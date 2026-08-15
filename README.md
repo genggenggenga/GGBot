@@ -13,12 +13,14 @@ FastAPI /chat
      -> KnowledgeAgent -> Hybrid RAG
      -> OrderAgent -> Commerce RPC tools
      -> LogisticsAgent -> Fulfillment RPC tools
-     -> AfterSalesAgent -> Skill + AfterSales RPC tools
+     -> AfterSalesAgent -> common + intent-specific Skill + AfterSales RPC tools
   -> Redis State / Memory
   -> Agent Trace
 ```
 
 `OrderAgent`、`LogisticsAgent` 和 `AfterSalesAgent` 复用同一个有界 `ServiceAgent`。FAQ 使用固定 RAG 路径，退款写操作必须先进入 `AWAITING_CONFIRMATION`，用户确认后才允许调用 `create_refund`。
+
+售后请求总是加载通用安全基线，并按当前意图追加专属 SOP；Skill 只能影响 ReAct 的处理顺序和回复规范，不能改变工具权限、确认门禁或业务 RPC 返回。
 
 ## 本地启动
 

@@ -1,13 +1,16 @@
 # GGBot Skills 文档
 
-GGBot 启动时会从 `GGBOT_SKILLS_DIR` 读取 Skills，并在匹配用户请求时注入到对应 Agent 的 system prompt。Skills 适合维护业务处理规范、客服话术、技术排障 SOP、账单审核边界、升级规则和禁止事项。
+GGBot 启动时会从 `GGBOT_SKILLS_DIR` 读取 Skills，并在售后请求匹配时注入 `AfterSalesAgent` 的 ReAct prompt。Skills 适合维护业务处理规范、售后话术、审核边界和升级规则。
 
-当前内置三类 Skills：
+当前内置售后 Skill：
 
 ```text
-skills/general_customer_service/SKILL.md  # 通用客服：接待、澄清、分流、投诉和转人工
-skills/technical_support/SKILL.md         # 技术支持：故障排查、接口错误、部署配置和安全边界
-skills/billing_support/SKILL.md           # 账单服务：扣款、退款、发票、订阅和财务审核
+skills/after_sales/common/SKILL.md  # 通用安全基线
+skills/after_sales/refund/SKILL.md  # 退款申请
+skills/after_sales/return/SKILL.md  # 退货申请
+skills/after_sales/cancel/SKILL.md  # 取消订单
+skills/after_sales/handoff/SKILL.md # 投诉与转人工
+skills/after_sales/request/SKILL.md # 通用售后请求
 ```
 
 ## Skill 文件格式
@@ -22,10 +25,11 @@ skills/<skill_name>/SKILL.md
 
 ```markdown
 ---
-name: 技术支持处理规范
-description: 适用于 TechnicalAgent 的故障排查和升级处理规范
-keywords: 报错,错误,接口,API,部署,超时,500,401,日志
-agents: technical
+name: 退款申请 SOP
+description: 适用于 AfterSalesAgent 的退款申请处理规范
+keywords:
+agents: after_sales
+intents: refund_request
 enabled: true
 ---
 ```
@@ -35,7 +39,8 @@ enabled: true
 - `name`：Skill 展示名称，会出现在注入给模型的 prompt 中。
 - `description`：简短说明，方便 `/skills` 接口排查。
 - `keywords`：触发关键词，用户消息命中后才注入；多个关键词用英文逗号或中文逗号分隔均可。
-- `agents`：适用 Agent，可填 `general`、`technical`、`billing`，多个值用逗号分隔。
+- `agents`：适用 Agent，当前主运行时仅支持 `after_sales`。
+- `intents`：适用意图，用于精确选择业务 SOP；留空表示对该 Agent 的所有意图生效。
 - `enabled`：是否启用，支持 `true/false`。
 
 ## 编写要求

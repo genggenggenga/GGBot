@@ -767,26 +767,36 @@ def test_runtime_evaluates_completion_condition_for_each_goal():
     assert all(result.completed for result in results)
 
 
-def test_skill_loader_reads_after_sales_skill_metadata():
+def test_skill_loader_composes_common_and_intent_specific_after_sales_skills():
     root = Path(__file__).parent.parent / "skills"
     manager = SkillManager(str(root))
     skills = manager.load()
-    after_sales = next(
+    assert all(not skill.name.startswith("GGBot Skills") for skill in skills)
+    refund = next(
         skill for skill in skills
-        if skill.name == "售后处理软策略"
+        if skill.name == "退款申请 SOP"
     )
 
-    assert after_sales.agents == [AFTER_SALES_AGENT]
-    assert "refund_request" in after_sales.intents
-    assert after_sales.version == "1"
-    assert "refund_request" in after_sales.eval_cases
-    assert after_sales.matches(
+    assert refund.agents == [AFTER_SALES_AGENT]
+    assert refund.intents == ["refund_request"]
+    assert refund.version == "2"
+    assert refund.eval_cases == ["refund_request"]
+
+    refund_context = manager.prompt_for(
         "我要退款",
         AFTER_SALES_AGENT,
         "refund_request",
     )
-    assert not after_sales.matches(
-        "查询订单",
-        ORDER_AGENT,
-        "order_query",
+    assert "售后通用安全基线" in refund_context
+    assert "退款申请 SOP" in refund_context
+    assert "退货申请 SOP" not in refund_context
+    assert "取消订单 SOP" not in refund_context
+
+    handoff_context = manager.prompt_for(
+        "我要投诉并转人工",
+        AFTER_SALES_AGENT,
+        "complaint",
     )
+    assert "售后通用安全基线" in handoff_context
+    assert "投诉与转人工 SOP" in handoff_context
+    assert "退款申请 SOP" not in handoff_context

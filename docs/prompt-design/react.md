@@ -75,6 +75,11 @@ ReAct Planner 每次只决定一个动作：
 
 重点：写操作安全、业务阶段准确、禁止越权承诺。
 
+售后 Agent 会额外按 `agent_type=after_sales + intent` 组合本地 Skill：每轮均加载
+`common` 安全基线，再加载退款、退货、取消订单、投诉/转人工或通用售后请求的专属
+SOP。Skill 只能补充处理顺序和回复规范，不能改变工具白名单、确认门禁、资格结果
+或幂等规则。
+
 ## Prompt 原文
 
 ### ReAct 通用决策器
@@ -117,6 +122,13 @@ ReAct Planner 每次只决定一个动作：
 ```text
 [当前领域职责]
 {ORDER_DOMAIN_POLICY | LOGISTICS_DOMAIN_POLICY | AFTER_SALES_DOMAIN_POLICY}
+```
+
+售后命中时继续追加：
+
+```text
+[售后 Skill 软策略]
+{售后通用安全基线 + 当前 intent 的专属 SOP}
 ```
 
 #### User Prompt 模板

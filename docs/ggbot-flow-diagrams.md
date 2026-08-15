@@ -600,7 +600,7 @@
 | `KnowledgeAgent` | FAQ、政策、技术、账户、问候、反馈 | 固定回复或单次 RAG | 否 |
 | `OrderAgent` | 订单状态、商品、支付、发票 | 受限 ReAct，失败后确定性降级 | 否 |
 | `LogisticsAgent` | 物流轨迹、预计送达、异常诊断 | 受限 ReAct，失败后确定性降级 | 否 |
-| `AfterSalesAgent` | 退款、退货、取消、投诉、转人工 | 售后 Skill + 受限 ReAct + 确认门禁 | 是 |
+| `AfterSalesAgent` | 退款、退货、取消、投诉、转人工 | `common + intent SOP`、受限 ReAct、确认门禁 | 是 |
 
 ## 7. KnowledgeAgent
 
@@ -765,7 +765,7 @@ order_id → query_order
 ┌─────────────────────────────────────┐
 │ SkillManager.prompt_for()           │
 │ message + agent_type + intent       │
-│ → 匹配售后 SOP 软策略               │
+│ → common + 当前 intent 专属 SOP     │
 │                                     │
 │ Skill 不能绕过白名单和确认门禁      │
 └──────────────────┬──────────────────┘

@@ -15,7 +15,7 @@ Prompt 源码统一位于 `core/prompts/`。本文档描述设计意图，源码
 | [RAG Prompt](rag.md) | Query Planner、Query Rewriter、Reranker、Grounded Answer 及原文 |
 | [回答润色 Prompt](response.md) | 最终回答表达优化、事实保护与失败回退 |
 | [Memory Prompt](memory.md) | 用户画像、工作记忆、情景记忆及原文 |
-| [Legacy Prompt](legacy.md) | Legacy 分类、实体与三类客服 Agent 及原文 |
+| [Legacy NLU Prompt](legacy.md) | 兼容意图分类与实体提取 Prompt |
 | [评测 Prompt](evaluation.md) | LLM-as-Judge 设计与原文 |
 | [治理与验证](governance.md) | 调用映射、评审清单与验证策略 |
 

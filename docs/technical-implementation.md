@@ -7,7 +7,7 @@
 | 项目     | 内容                      | 项目     | 内容                              |
 | -------- | ------------------------- | -------- | --------------------------------- |
 | 当前版本 | `feat-v1 / 7d7397a`          | 核心场景 | 退款申请与人工工单确认闭环        |
-| 验证结果 | 381 passed · 1 warning       | 技术主线 | 显式状态机 + 多 Agent + RPC + RAG |
+| 验证结果 | 390 passed · 1 warning       | 技术主线 | 显式状态机 + 多 Agent + RPC + RAG |
 
 > **项目定位**
 >
@@ -42,7 +42,7 @@
 
 **主运行时。** `POST /chat` 已切换到 `CustomerAgentRuntime → DialogueStateTracker → TurnEngine → DomainAgentRuntime → ToolRegistry`。FAQ 使用固定 RAG 路径；订单、物流和退款使用有界 ServiceAgent；写操作在用户确认前不会执行。
 
-**兼容运行时。** 仓库仍保留早期 `AgentOrchestrator` 与 `MCPToolManager` 供显式 legacy 评测使用，但 `/chat`、`/search`、默认评测、CLI 和在线监控均已迁移到 CustomerAgentRuntime / ToolRegistry。Legacy evaluator 默认不初始化，仅在 `ENABLE_LEGACY_EVAL=true` 时启用。
+**单一运行时。** `/chat`、`/search`、评测、CLI 和在线监控统一使用 CustomerAgentRuntime / ToolRegistry；旧 AgentOrchestrator 已移除。
 
 ### 启动装配与模块边界
 
@@ -271,6 +271,8 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 **上下文装配顺序固定。** MemoryContext 将 DialogueState、最近消息、会话摘要、相关历史、用户画像和 Observation 分区输出。售后 Skill 不在 API 层全局注入，而是在路由确定 `AfterSalesAgent + intent` 后单独解析并传给 ReActPlanner。
 
+**售后 Skill 按意图组合。** 每轮售后请求均匹配 `after_sales/common/SKILL.md` 作为安全基线，再匹配唯一的意图 SOP：`refund_request → refund`、`return_request → return`、`cancel_order → cancel`、`complaint/escalation → handoff`、`request → request`。README 文件仅用于说明，SkillLoader 会忽略所有 `README*` 文件，避免文档被误注入 Prompt。
+
 **同步存储调用不阻塞事件循环。** `_backend_call()` 识别异步客户端；对于同步 Redis / Chroma 方法统一使用 `asyncio.to_thread()`。RAG 工具和 `/search` 也把同步 Retriever 查询移出事件循环，避免单次向量检索阻塞并发请求。
 
 **会话事务覆盖记忆提交。** Redis 分布式锁覆盖上下文读取、Agent 执行、DialogueState 保存、消息写入和情景记忆事件。相同 user_id + conv_id 串行，不同会话仍可并发。
@@ -317,11 +319,11 @@ Order、Logistics 和 AfterSales 复用同一个 ServiceAgent 执行骨架，默
 
 样本分为 DST、Tool、RAG、E2E 和 NLU 五组。指标层分别计算 Intent Accuracy / Macro-F1、Slot Precision / Recall / F1、DST Joint Goal Accuracy、Recall@5、MRR、工具选择与参数准确率、任务完成率、Citation Precision 和 Faithfulness。
 
-消融会在 dense、hybrid、rerank 三种模式下重复执行同一批样本。当前 FakeDenseIndex 依赖 token overlap，FakeReranker 依赖稳定哈希，因此结果适合做代码回归，不等价于 BGE 与 Cross-Encoder 的真实离线效果。另一个 legacy EndToEndEvaluator 支持 LLM-as-Judge，但受模型波动和调用成本影响，不作为当前确定性报告的依据。
+消融会在 dense、hybrid、rerank 三种模式下重复执行同一批样本。当前 FakeDenseIndex 依赖 token overlap，FakeReranker 依赖稳定哈希，因此结果适合做代码回归，不等价于 BGE 与 Cross-Encoder 的真实离线效果。
 
 Chunking 另有独立黄金评测集 `data/eval/rag_chunking_cases.json`。`evaluation/chunking_eval.py` 实际执行 `load_document → chunk_sections → BM25Index`，检查 Retrieval Hit Rate、MRR、证据完整率、Section 准确率和 token 预算违规；该评测不使用 FakeDense 或 FakeReranker，也不代表真实向量模型效果。
 
-全量 pytest 覆盖状态转移、会话并发锁、内部 RPC、Redis 共享幂等、原生 Tool Calling、售后 Skill、确认门禁、RAG Loader/索引/融合、知识版本、记忆、监控、Trace 和 API 回归。当前验证结果为 381 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
+全量 pytest 覆盖状态转移、会话并发锁、内部 RPC、Redis 共享幂等、原生 Tool Calling、售后 Skill、确认门禁、RAG Loader/索引/融合、知识版本、记忆、监控、Trace 和 API 回归。当前验证结果为 390 passed；这说明实现行为可回归，但不代表真实业务数据上的模型效果已经达标。
 
 ## 6. API 与部署形态
 
@@ -336,7 +338,7 @@ Chunking 另有独立黄金评测集 `data/eval/rag_chunking_cases.json`。`eval
 
 ### 应用启动顺序与配置
 
-lifespan 启动时首先校验 `ANTHROPIC_API_KEY`，读取模型、Skills 目录和 Redis/Chroma 地址。SkillManager 只向 AfterSalesAgent 提供匹配当前售后意图的软策略；OrderAgent、LogisticsAgent 和 KnowledgeAgent 不注入 Skill。权限、确认、资格和幂等始终由代码与 RPC 保证。
+lifespan 启动时首先校验 `ANTHROPIC_API_KEY`，读取模型、Skills 目录和 Redis/Chroma 地址。SkillManager 只向 AfterSalesAgent 提供“通用安全基线 + 当前意图专属 SOP”；OrderAgent、LogisticsAgent 和 KnowledgeAgent 不注入 Skill。权限、确认、资格和幂等始终由代码与 RPC 保证。
 
 Redis 同时服务 DialogueState 与工作记忆，但使用不同 key 空间；ChromaDB 优先连接独立服务，失败后回退本地 PersistentClient。KnowledgeBase 为空时写入演示知识，KnowledgeRuntime 再基于 collection 构建 Dense/BM25/Reranker 链路。若启用本地 BGE 模型，首次启动需要准备模型缓存。
 
@@ -344,7 +346,7 @@ Redis 同时服务 DialogueState 与工作记忆，但使用不同 key 空间；
 
 | 关键配置                     | 作用                                                     |
 | ---------------------------- | -------------------------------------------------------- |
-| `ANTHROPIC_MODEL / BASE_URL` | 选择结构化 NLU、摘要和 legacy Agent 使用的模型与兼容端点 |
+| `ANTHROPIC_MODEL / BASE_URL` | 选择结构化 NLU、摘要、规划和生成使用的模型与兼容端点 |
 | `REDIS_URL`                  | DialogueState、工作记忆和会话摘要连接地址                |
 | `ACTION_IDEMPOTENCY_TTL_S`   | 写 RPC 幂等状态与结果的 Redis 保留时间                   |
 | `CONVERSATION_LOCK_LEASE_S`  | 同一会话分布式锁租约时间                                 |
@@ -362,8 +364,7 @@ Redis 同时服务 DialogueState 与工作记忆，但使用不同 key 空间；
 | `RAG_ANSWER_MAX_CHUNKS`       | 单次回答最多组装的重排证据数，默认 5                     |
 | `RAG_ANSWER_MAX_CONTEXT_TOKENS` | 单次回答的证据 Token 预算，默认 1800                   |
 | `RAG_ANSWER_TIMEOUT_S`        | 证据生成超时，超时后降级为抽取式回答                    |
-| `GGBOT_SKILLS_DIR`           | 业务 Skill 的扫描目录，支持运行时 reload                 |
-| `ENABLE_LEGACY_EVAL`         | 仅在显式需要时初始化旧 LLM evaluator                     |
+| `GGBOT_SKILLS_DIR`           | 业务 Skill 的扫描目录；售后按意图组合 `common + 专属 SOP` |
 
 Docker Compose 将 Redis、ChromaDB、Prometheus、GGBot 和 Nginx 放在同一网络内，通过服务健康检查控制启动依赖。Redis 开启 AOF，Chroma 和 Prometheus 使用持久卷；应用容器以非 root 用户运行，并把知识数据、评测报告、Skills 和日志映射到宿主机目录。
 

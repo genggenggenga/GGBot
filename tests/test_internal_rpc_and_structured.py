@@ -229,5 +229,7 @@ async def test_only_after_sales_agent_resolves_skill_context():
         "查询订单",
     )
 
-    assert "售后处理软策略" in after_sales_planner.calls[0]["skill_context"]
+    assert "售后通用安全基线" in after_sales_planner.calls[0]["skill_context"]
+    assert "退款申请 SOP" in after_sales_planner.calls[0]["skill_context"]
+    assert "退货申请 SOP" not in after_sales_planner.calls[0]["skill_context"]
     assert order_planner.calls[0]["skill_context"] == ""

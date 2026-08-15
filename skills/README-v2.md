@@ -5,9 +5,12 @@ GGBot 从 `GGBOT_SKILLS_DIR` 加载 Skill。当前主运行时只把匹配的 Sk
 ## 当前文件
 
 ```text
-skills/after_sales/SKILL.md              # 主运行时：售后软策略
-skills/general_customer_service/SKILL.md # Legacy AgentOrchestrator
-skills/technical_support/SKILL.md        # Legacy AgentOrchestrator
+skills/after_sales/common/SKILL.md  # 所有售后意图共享的安全基线
+skills/after_sales/refund/SKILL.md  # refund_request
+skills/after_sales/return/SKILL.md  # return_request
+skills/after_sales/cancel/SKILL.md  # cancel_order
+skills/after_sales/handoff/SKILL.md # complaint, escalation
+skills/after_sales/request/SKILL.md # request
 ```
 
 旧 `billing_support` 已删除，由 `after_sales` 承接退款、退货、取消订单、投诉和转人工 SOP。
@@ -44,13 +47,13 @@ skills/<skill_name>/SKILL.md
 
 ```markdown
 ---
-name: 售后处理软策略
-description: 售后 Agent 的退款、退货、取消订单、投诉和转人工处理 SOP
+name: 退款申请 SOP
+description: 退款申请的资格核验、金额说明、确认与提交规范
 keywords:
 agents: after_sales
-intents: refund_request,return_request,cancel_order,complaint,escalation,request
-version: 1
-eval_cases: refund_request,return_request,cancel_order,complaint
+intents: refund_request
+version: 2
+eval_cases: refund_request
 enabled: true
 ---
 ```
@@ -81,7 +84,10 @@ Router
        [售后 Skill 软策略]
 ```
 
-OrderAgent、LogisticsAgent 和 KnowledgeAgent 当前不消费 Skill。
+匹配规则会组合 `common` 与当前意图的专属 SOP。例如退款请求加载
+`售后通用安全基线 + 退款申请 SOP`；投诉请求加载
+`售后通用安全基线 + 投诉与转人工 SOP`。OrderAgent、LogisticsAgent 和
+KnowledgeAgent 当前不消费 Skill。
 
 ## 编写要求
 

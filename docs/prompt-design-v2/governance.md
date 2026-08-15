@@ -19,10 +19,8 @@
 | 用户画像 | `build_profile_prompt` | `memory/conversation_memory.py` |
 | 工作/情景摘要 | `build_summary_prompt` | `memory/conversation_memory.py` |
 | Legacy 意图/实体 | `build_intent_prompt` / `build_entity_prompt` | `core/intent_recognizer.py` |
-| Legacy 客服 Agent | 三类 Agent 常量 | `agents/agent_orchestrator.py` |
-| LLM Judge | `build_judge_prompt` | `evaluation/evaluator.py` |
 
-主运行时的 NLU、ReAct、Query Planner、Grounded Answer、回答润色和画像提取共享 `core/structured_llm.py`。旧 Query Rewrite、Rerank、Legacy 和 LLM Judge 仍使用严格 JSON 文本输出，只用于兼容或评测路径。
+主运行时的 NLU、ReAct、Query Planner、Grounded Answer、回答润色和画像提取共享 `core/structured_llm.py`。旧 Query Rewrite、Rerank 和 Legacy NLU 提示词仍使用严格 JSON 文本输出。
 
 ## Prompt 变更评审清单
 

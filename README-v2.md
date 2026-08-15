@@ -20,12 +20,14 @@ FastAPI /chat
      -> KnowledgeAgent -> QueryPlanner -> Hybrid RAG -> Grounded Answer
      -> OrderAgent -> bounded ReAct -> Commerce RPC tools
      -> LogisticsAgent -> bounded ReAct -> Fulfillment RPC tools
-     -> AfterSalesAgent -> scoped Skill + bounded ReAct -> AfterSales RPC tools
+     -> AfterSalesAgent -> common + intent-specific Skill -> bounded ReAct -> AfterSales RPC tools
   -> Redis State / Memory
   -> Agent Trace
 ```
 
 `OrderAgent`、`LogisticsAgent` 和 `AfterSalesAgent` 复用同一个有界 `ServiceAgent`。FAQ 使用固定 RAG 路径；退款、退货、取消订单和工单创建必须先进入 `AWAITING_CONFIRMATION`。Planner 失败时，非退款售后不会降级到退款流程。
+
+售后请求按意图组合 Skill：所有请求加载通用安全基线，再加载退款、退货、取消订单、投诉/转人工或通用请求的专属 SOP。Skill 仅约束规划顺序和话术，不能改变 ToolRegistry 的白名单、确认门禁或 RPC 事实。
 
 ## 本地启动
 
@@ -169,4 +171,4 @@ Tool 与 E2E 用例现在通过真实 `CustomerAgentRuntime → TurnEngine → D
 
 `data/eval/baseline_comparison.json` 的 `comparison_type` 为 `synthetic_or_legacy_rules`。该文件仅用于本地回归对照，不是真实线上基线，也不能用于宣称生产效果或线上提升。
 
-当前全量回归结果为 `383 passed, 1 warning`。该结果证明代码行为可回归，不证明真实模型、知识数据或业务 RPC 已达到生产标准。
+当前全量回归结果为 `390 passed, 1 warning`。该结果证明代码行为可回归，不证明真实模型、知识数据或业务 RPC 已达到生产标准。

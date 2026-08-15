@@ -75,7 +75,7 @@ ReAct Planner 每次只决定一个动作：
 
 重点：写操作安全、业务阶段准确、禁止越权承诺。
 
-售后 Agent 会额外按 `agent_type=after_sales + intent` 匹配本地 Skill，并以 `[售后 Skill 软策略]` 追加到领域职责之后。Skill 只能补充 SOP、澄清顺序和回复规范，不能改变工具白名单、READ/WRITE 类型、确认门禁、资格结果或幂等规则。
+售后 Agent 会额外按 `agent_type=after_sales + intent` 组合本地 Skill，并以 `[售后 Skill 软策略]` 追加到领域职责之后。每轮均加载 `common` 安全基线，再加载唯一的专属 SOP：退款、退货、取消订单、投诉/转人工或通用售后请求。Skill 只能补充 SOP、澄清顺序和回复规范，不能改变工具白名单、READ/WRITE 类型、确认门禁、资格结果或幂等规则。
 
 ### 5.6 结构化执行与降级
 
@@ -137,7 +137,7 @@ Planner 调用异常时，Order 与 Logistics 可进入各自确定性 fallback�
 
 ```text
 [售后 Skill 软策略]
-{仅匹配当前 after_sales Agent 与 intent 的 Skill 内容}
+{售后通用安全基线 + 仅匹配当前 intent 的专属 SOP}
 ```
 
 #### User Prompt 模板

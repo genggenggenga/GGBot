@@ -241,7 +241,10 @@ class SkillManager:
             resolved = path.resolve()
             if resolved in yielded or not path.is_file():
                 continue
-            if path.name.startswith(".") or path.name.upper() == "README.MD":
+            if (
+                path.name.startswith(".")
+                or path.stem.upper().startswith("README")
+            ):
                 continue
             if path.suffix.lower() in self.SUPPORTED_SUFFIXES:
                 yield path

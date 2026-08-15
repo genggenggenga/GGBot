@@ -1,7 +1,6 @@
 import asyncio
 import inspect
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,16 +14,6 @@ def run(coro):
 
 
 def test_health_and_skill_endpoints_remain_compatible(monkeypatch):
-    class Orchestrator:
-        def __init__(self):
-            self.skill_manager = None
-
-        def get_stats(self):
-            return {"general": {"total": 1}}
-
-        def set_skill_manager(self, manager):
-            self.skill_manager = manager
-
     class Skills:
         def __init__(self):
             self.reload_count = 0
@@ -35,7 +24,6 @@ def test_health_and_skill_endpoints_remain_compatible(monkeypatch):
         def summary(self):
             return {"count": 3}
 
-    orchestrator = Orchestrator()
     skills = Skills()
     runtime = SimpleNamespace(
         get_stats=lambda: {"knowledge": {"total": 1}},
@@ -44,7 +32,6 @@ def test_health_and_skill_endpoints_remain_compatible(monkeypatch):
         get_stats=lambda: {"rag_search": {"total": 1}},
         list_tools=lambda: [],
     )
-    monkeypatch.setattr(api_main, "_orchestrator", orchestrator)
     monkeypatch.setattr(api_main, "_skill_manager", skills)
     monkeypatch.setattr(api_main, "_customer_runtime", runtime)
     monkeypatch.setattr(api_main, "_tool_registry", registry)
@@ -59,7 +46,6 @@ def test_health_and_skill_endpoints_remain_compatible(monkeypatch):
     assert run(api_main.skills_summary()) == {"count": 3}
     assert run(api_main.reload_skills()) == {"count": 3}
     assert skills.reload_count == 1
-    assert orchestrator.skill_manager is skills
 
 
 def test_health_rejects_partial_primary_runtime(monkeypatch):
@@ -323,12 +309,12 @@ def test_eval_rejects_unknown_mode():
     assert exc_info.value.status_code == 400
 
 
-def test_legacy_baseline_is_not_loaded_by_default():
+def test_runtime_does_not_initialize_legacy_agent_components():
     source = inspect.getsource(api_main._runtime_components)
 
-    assert '"/app/data/eval/runtime_baseline.json"' in source
-    assert '"/app/data/eval/baseline.json"' not in source
-    assert not Path("data/eval/baseline.json").exists()
+    assert "AgentOrchestrator" not in source
+    assert "EndToEndEvaluator" not in source
+    assert "ENABLE_LEGACY_EVAL" not in source
 
 
 def test_cli_reuses_primary_chat_runtime():

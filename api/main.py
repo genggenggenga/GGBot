@@ -46,10 +46,8 @@ BANNER = r"""
 """
 
 # ── 全局组件（lifespan 中初始化）─────────────────────────────────────────────
-_orchestrator = None
 _memory       = None
 _monitor      = None
-_evaluator    = None
 _skill_manager = None
 _customer_runtime = None
 _trace_store = None
@@ -73,7 +71,7 @@ def _anthropic_cfg() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def _runtime_components(app: FastAPI):
-    global _orchestrator, _memory, _monitor, _evaluator, _skill_manager
+    global _memory, _monitor, _skill_manager
     global _customer_runtime, _trace_store, _knowledge_runtime
     global _tool_registry, _conversation_locks
 
@@ -339,33 +337,6 @@ async def _runtime_components(app: FastAPI):
     )
     await _monitor.start()
 
-    # Legacy LLM evaluator 仅在显式开关下初始化。
-    _orchestrator = None
-    _evaluator = None
-    if os.getenv("ENABLE_LEGACY_EVAL", "false").lower() in {
-        "1", "true", "yes", "on",
-    }:
-        from agents.agent_orchestrator import AgentOrchestrator
-        from evaluation.evaluator import EndToEndEvaluator
-
-        _orchestrator = AgentOrchestrator(
-            api_key=cfg["api_key"],
-            base_url=cfg.get("base_url"),
-            model=cfg["model"],
-            skill_manager=_skill_manager,
-        )
-        _evaluator = EndToEndEvaluator(
-            orchestrator=_orchestrator,
-            recognizer=recognizer,
-            api_key=cfg["api_key"],
-            base_url=cfg.get("base_url"),
-            model=cfg["model"],
-            baseline_path=os.getenv(
-                "EVAL_BASELINE_PATH",
-                "/app/data/eval/runtime_baseline.json",
-            ),
-        )
-
     logger.info("GGBot 已就绪")
     yield
 
@@ -511,8 +482,6 @@ async def reload_skills():
     if _skill_manager is None:
         raise HTTPException(503, "Skills 未初始化")
     _skill_manager.reload()
-    if _orchestrator is not None:
-        _orchestrator.set_skill_manager(_skill_manager)
     return _skill_manager.summary()
 
 
@@ -682,26 +651,9 @@ class PublishVersionInput(BaseModel):
     expires_at: Optional[datetime] = None
 
 
-class EvalIntentInput(BaseModel):
-    """意图识别评测用例。"""
-    message: str
-    expected_intent: str
-    context: Optional[Dict[str, Any]] = None
-
-
-class EvalDialogInput(BaseModel):
-    """对话质量评测用例。question 单轮，turns 多轮。"""
-    question: Optional[str] = None
-    turns: Optional[List[str]] = None
-    user_id: Optional[str] = None
-    conv_id: Optional[str] = None
-
-
 class EvalRunInput(BaseModel):
-    """评测请求。为空时使用内置默认用例。"""
+    """评测请求。仅支持当前 CustomerAgentRuntime。"""
     mode: str = "customer_agent"
-    intent_cases: Optional[List[EvalIntentInput]] = None
-    dialog_cases: Optional[List[EvalDialogInput]] = None
 
 
 @app.post("/knowledge/add", tags=["知识库"])
@@ -895,66 +847,17 @@ async def revoke_knowledge_version(
 @app.post("/eval/run")
 async def run_eval(body: Optional[EvalRunInput] = None):
     """运行内置评测用例，返回评测报告。"""
-    if body is None or body.mode == "customer_agent":
-        from evaluation.local_eval_runner import run_local_eval
-
-        report = await run_local_eval()
-        return {
-            "mode": "customer_agent",
-            "generated_at": report.generated_at,
-            "reproduce_command": report.reproduce_command,
-            "sample_size": report.sample_size,
-            "summary": report.summary,
-        }
-
-    if body.mode != "legacy":
+    if body is not None and body.mode != "customer_agent":
         raise HTTPException(400, f"不支持的评测模式: {body.mode}")
+    from evaluation.local_eval_runner import run_local_eval
 
-    if _evaluator is None:
-        raise HTTPException(503, "服务未就绪")
-    from evaluation.evaluator import DEFAULT_DIALOG_CASES, DEFAULT_INTENT_CASES, IntentTestCase
-
-    if body and body.intent_cases is not None:
-        intent_cases = [
-            IntentTestCase(
-                message=c.message,
-                expected_intent=c.expected_intent,
-                context=c.context,
-            )
-            for c in body.intent_cases
-        ]
-    else:
-        intent_cases = DEFAULT_INTENT_CASES
-
-    if body and body.dialog_cases is not None:
-        dialog_cases = [
-            c.model_dump(exclude_none=True)
-            for c in body.dialog_cases
-        ]
-    else:
-        dialog_cases = DEFAULT_DIALOG_CASES
-
-    report = await _evaluator.run(
-        intent_cases=intent_cases,
-        dialog_cases=dialog_cases,
-    )
+    report = await run_local_eval()
     return {
-        "pass_rate":       report.pass_rate,
-        "total":           report.total,
-        "passed":          report.passed,
-        "avg_scores":      report.avg_scores,
-        "regressions":     report.regressions,
-        "recommendations": report.recommendations,
-        "results": [
-            {
-                "test_id": r.test_id,
-                "passed": r.passed,
-                "scores": r.scores,
-                "detail": r.detail,
-                "metadata": r.metadata,
-            }
-            for r in report.results
-        ],
+        "mode": "customer_agent",
+        "generated_at": report.generated_at,
+        "reproduce_command": report.reproduce_command,
+        "sample_size": report.sample_size,
+        "summary": report.summary,
     }
 
 
