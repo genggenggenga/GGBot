@@ -1,4 +1,5 @@
 """State-driven customer-service runtime used by the /chat endpoint."""
+import logging
 import os
 import time
 import uuid
@@ -23,10 +24,13 @@ from core.agent_models import (
 )
 from core.dialogue_state_tracker import DialogueStateTracker
 from core.metrics import record_chat_turn
+from core.nlu_llm import NLUServiceUnavailable
 from core.response_polisher import ResponsePolisher
 from core.tool_names import logical_tool_name
 from core.trace_store import TraceStore, summarize_observations
 from core.turn_engine import TurnEngine
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -108,11 +112,32 @@ class CustomerAgentRuntime:
         trace_id = str(uuid.uuid4())
         engine = self._turn_engine.fork()
         previous = await engine.load_context(user_id, conv_id)
-        understanding = await self._recognizer.recognize_structured(
-            message,
-            history=history,
-            current_state=previous.dialogue_state.model_dump(mode="json"),
-        )
+        try:
+            understanding = await self._recognizer.recognize_structured(
+                message,
+                history=history,
+                current_state=previous.dialogue_state.model_dump(mode="json"),
+            )
+        except NLUServiceUnavailable as ex:
+            # LLM 后端不可用（400/500/超时），且 fast-track 无关键词证据可降级。
+            # 不应伪装成"用户意图不明确"误导用户反复重述需求。
+            logger.warning(f"NLU service unavailable: {ex}")
+            latency_ms = (time.monotonic() - started) * 1000
+            record_chat_turn(
+                agent="fallback",
+                intent="other",
+                status="failed",
+                latency_ms=latency_ms,
+            )
+            return CustomerTurnResult(
+                trace_id=trace_id,
+                response="抱歉，智能客服暂时不可用，请稍后再试。",
+                intent="other",
+                agent_type="fallback",
+                status="failed",
+                escalated=False,
+                latency_ms=latency_ms,
+            )
         intent_clarification = self._intent_clarification(
             previous.dialogue_state,
             understanding,
@@ -476,9 +501,24 @@ class CustomerAgentRuntime:
         }
         return prompts.get(slot, f"请补充 {slot}。")
 
+    @staticmethod
+    def _rejected_slot_prompt(rejected_slots: Dict[str, str]) -> str:
+        """Build a user-facing message for slots that failed business validation."""
+        slot, value = next(iter(rejected_slots.items()))
+        labels = {
+            "order_id": "订单号",
+            "tracking_no": "物流单号",
+        }
+        label = labels.get(slot, slot)
+        return f"未找到{label} {value}，请确认后重新输入。"
+
     @classmethod
     def _intent_clarification(cls, state, understanding) -> Optional[str]:
         """Return a clarification prompt when an intent is unsafe to accept."""
+        # 优先处理 slot 被业务验证拒绝的情况（如订单号不存在），
+        # 让用户知道是输入有误，而不是没提供。
+        if understanding.rejected_slots:
+            return cls._rejected_slot_prompt(understanding.rejected_slots)
         if (
             understanding.user_act in {UserAct.CONFIRM, UserAct.REJECT}
             and state.confirmation_status == ConfirmationStatus.PENDING

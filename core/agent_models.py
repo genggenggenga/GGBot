@@ -134,6 +134,7 @@ class UnderstandingResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     extracted_slots: Dict[str, Any] = Field(default_factory=dict)
     corrected_slots: List[str] = Field(default_factory=list)
+    rejected_slots: Dict[str, str] = Field(default_factory=dict)
     user_act: UserAct = UserAct.INFORM
     route_to: Optional[str] = None
 

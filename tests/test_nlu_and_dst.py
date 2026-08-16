@@ -27,6 +27,7 @@ from core.nlu_fast_track import (
     fast_track_extract,
 )
 from core.nlu_llm import (
+    NLUServiceUnavailable,
     _build_prompt,
     make_fallback_understanding,
     understand_with_llm,
@@ -560,11 +561,14 @@ class TestUnderstandWithLlm:
 
     @pytest.mark.asyncio
     async def test_exception_degrades(self):
+        """LLM backend failure must surface as NLUServiceUnavailable so the
+        runtime can return a service-outage message instead of masking the
+        outage as 'user intent unclear'."""
         async def mock_llm(prompt: str) -> str:
             raise RuntimeError("LLM unavailable")
 
-        result = await understand_with_llm("测试", mock_llm)
-        assert result.primary_intent == "other"
+        with pytest.raises(NLUServiceUnavailable):
+            await understand_with_llm("测试", mock_llm)
 
     @pytest.mark.asyncio
     async def test_empty_output_degrades(self):
