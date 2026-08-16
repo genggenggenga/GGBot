@@ -25,6 +25,7 @@ from core.tool_names import canonical_tool_name, logical_tool_name
 from core.tool_registry import ToolRegistry, ToolType
 from rag.answer_generator import RAGAnswerGenerator
 from rag.query_planner import QueryPlanner
+from rag.tool import TEMPORAL_CHANGE_PATTERN
 
 
 logger = logging.getLogger(__name__)
@@ -1001,7 +1002,7 @@ class KnowledgeAgent:
             end = context.find("\n\n[", start)
             value = context[start:end if end >= 0 else None].strip()
             if value:
-                sections.append(f"[{label}] {value[:500]}")
+                sections.append(value[:500])
         if not sections:
             return message
         suffix = "\n".join(sections)
@@ -1043,6 +1044,11 @@ class KnowledgeAgent:
             if query not in queries:
                 queries.append(query)
         queries = queries[:planner.max_queries]
+        temporal_mode = (
+            "compare_previous"
+            if TEMPORAL_CHANGE_PATTERN.search(message)
+            else "current"
+        )
         result = await self._registry.call(
             self.name,
             self._rag_tool,
@@ -1050,6 +1056,7 @@ class KnowledgeAgent:
                 "query": primary_query,
                 "queries": queries,
                 "mode": "rerank",
+                "temporal_mode": temporal_mode,
             },
             context={"prompt_context": context} if context else None,
         )
@@ -1076,7 +1083,10 @@ class KnowledgeAgent:
             )
 
         comparison = payload.get("temporal_comparison")
-        if isinstance(comparison, dict):
+        if (
+            isinstance(comparison, dict)
+            and TEMPORAL_CHANGE_PATTERN.search(message)
+        ):
             return AgentResult(
                 agent=self.name,
                 success=True,

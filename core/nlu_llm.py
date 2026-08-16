@@ -19,6 +19,17 @@ from core.prompts.types import PromptSpec
 logger = logging.getLogger(__name__)
 
 
+class NLUServiceUnavailable(RuntimeError):
+    """Raised when the LLM backend is unreachable or rejects the request.
+
+    This is distinct from low-quality but successful LLM output (empty text,
+    non-JSON, validation failure), which still degrades to
+    ``make_fallback_understanding``.  An unavailable backend should not be
+    masked as "user intent unclear" — callers should surface a service
+    outage message instead.
+    """
+
+
 class _NLUOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -227,6 +238,10 @@ async def understand_with_llm(
 
         return _normalize_user_act(result, current_state)
 
+    except NLUServiceUnavailable:
+        raise
     except Exception as ex:
-        logger.warning(f"LLM structured call failed: {ex}, degrading")
-        return make_fallback_understanding(text, current_state)
+        # LLM 后端不可用（400/500/超时/网络错误）。不应伪装成"用户意图不明确"，
+        # 否则会误导用户反复重述需求。抛出让上层返回服务不可用提示。
+        logger.warning(f"LLM structured call failed: {ex}")
+        raise NLUServiceUnavailable(str(ex)) from ex

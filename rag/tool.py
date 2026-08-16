@@ -8,7 +8,7 @@ from rag.retriever import HybridRetriever
 from rag.versioning import RetrievalFilter
 
 
-_TEMPORAL_CHANGE_PATTERN = re.compile(
+TEMPORAL_CHANGE_PATTERN = re.compile(
     r"(?:最近|近期|之前|以前|历史|新旧|变化|变更|调整|更新|改了|区别|相比)",
     re.IGNORECASE,
 )
@@ -92,6 +92,18 @@ def execute_rag_search(
         params.get("temporal_mode", "auto"),
         params["query"],
     )
+    if temporal_mode == "compare_previous" and not result.answered:
+        # 版本对比问题的检索不应被重排相关性阈值卡死：先用不经过重排的
+        # 混合检索再查一次当前版本，保证能进入版本对比分支。
+        result = _search(
+            retriever,
+            queries,
+            params["query"],
+            params.get("top_k", 5),
+            params.get("candidate_k", 20),
+            "hybrid",
+            current_filter,
+        )
     if temporal_mode != "compare_previous" or not result.answered:
         payload = _payload_with_parent_contexts(retriever, result, current_filter)
         payload["temporal_mode"] = temporal_mode
@@ -112,7 +124,7 @@ def execute_rag_search(
             params["query"],
             params.get("top_k", 5),
             params.get("candidate_k", 20),
-            mode,
+            "hybrid" if temporal_mode == "compare_previous" else mode,
             previous_filter,
         )
     return _temporal_payload(result, previous, str(knowledge_id or ""))
@@ -214,7 +226,7 @@ def _resolve_temporal_mode(mode: str, query: str) -> str:
     if mode == "auto":
         return (
             "compare_previous"
-            if _TEMPORAL_CHANGE_PATTERN.search(query)
+            if TEMPORAL_CHANGE_PATTERN.search(query)
             else "current"
         )
     return mode

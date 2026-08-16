@@ -608,6 +608,67 @@ async def test_rag_search_compares_current_and_previous_versions():
 
 
 @pytest.mark.asyncio
+async def test_rag_search_temporal_mode_falls_back_when_rerank_rejects_all():
+    v1 = DocumentChunk(
+        chunk_id="refund-v1",
+        content="退款政策：签收后十五天内可退款。",
+        source="refund.md",
+        title="退款政策",
+        section="期限",
+        chunk_index=0,
+        parent_id="refund-v1-parent",
+        metadata={
+            "knowledge_id": "refund-policy",
+            "version": "v1",
+            "status": "published",
+            "effective_at": 100.0,
+            "expires_at": 200.0,
+        },
+    )
+    v2 = DocumentChunk(
+        chunk_id="refund-v2",
+        content="退款政策：签收后七天内可退款。",
+        source="refund.md",
+        title="退款政策",
+        section="期限",
+        chunk_index=0,
+        parent_id="refund-v2-parent",
+        metadata={
+            "knowledge_id": "refund-policy",
+            "version": "v2",
+            "status": "published",
+            "effective_at": 200.0,
+            "expires_at": MAX_TIMESTAMP,
+        },
+    )
+    dense = FakeDenseIndex()
+    sparse = BM25Index()
+    sparse.add([v1, v2])
+    retriever = HybridRetriever(
+        dense,
+        sparse,
+        reranker=FakeReranker(),
+        rerank_threshold=0.95,
+        metadata_boost_enabled=False,
+    )
+    registry = ToolRegistry()
+    register_rag_tool(registry, retriever, agent_names=["knowledge"])
+
+    result = await registry.call(
+        "knowledge",
+        "rag_search",
+        {"query": "退款政策最近有没有变化", "mode": "rerank"},
+    )
+
+    assert result.success
+    assert result.data["temporal_mode"] == "compare_previous"
+    comparison = result.data["temporal_comparison"]
+    assert comparison["current_version"] == "v2"
+    assert comparison["previous_version"] == "v1"
+    assert comparison["changed"] is True
+
+
+@pytest.mark.asyncio
 async def test_rag_search_keeps_current_mode_for_non_temporal_query():
     chunk = make_chunk("current", "七天内可退款")
     dense = FakeDenseIndex([

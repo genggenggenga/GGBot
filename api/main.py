@@ -127,6 +127,9 @@ async def _runtime_components(app: FastAPI):
     structured_client = StructuredLLMClient(
         recognizer.client,
         cfg["model"],
+        # 第三方兼容端点（如 DeepSeek v4）默认开启 thinking，与强制 tool_choice
+        # 冲突；显式禁用以解锁结构化工具调用。官方 Anthropic API 无需此参数。
+        disable_thinking=bool(cfg.get("base_url")),
     )
     recognizer.set_structured_client(structured_client)
 

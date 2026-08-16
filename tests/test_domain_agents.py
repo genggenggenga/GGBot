@@ -549,6 +549,71 @@ def test_knowledge_agent_formats_temporal_version_comparison():
     assert result.response.endswith("[1][2]")
 
 
+@pytest.mark.parametrize(
+    ("message", "expected_mode"),
+    [
+        ("如何开发票", "current"),
+        ("退款政策最近有没有变化", "compare_previous"),
+    ],
+)
+def test_knowledge_agent_sends_explicit_temporal_mode_from_user_message(
+    message,
+    expected_mode,
+):
+    registry = ToolRegistry()
+    seen = {}
+
+    async def rag_search(params, context):
+        seen["temporal_mode"] = params.get("temporal_mode")
+        return {
+            "answered": True,
+            "hits": [{"chunk": {"content": "发票规则答案"}}],
+            "citations": [{"citation_id": "[1]", "source": "invoice.md"}],
+        }
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    result = run(KnowledgeAgent(registry).execute(
+        DialogueState(active_intent="query"),
+        message,
+    ))
+
+    assert result.success
+    assert seen["temporal_mode"] == expected_mode
+
+
+def test_knowledge_agent_answers_normally_when_temporal_payload_not_requested():
+    registry = ToolRegistry()
+
+    async def rag_search(params, context):
+        return {
+            "answered": True,
+            "hits": [{
+                "chunk": {
+                    "content": "用户可在订单完成后 30 天内申请电子发票。",
+                },
+            }],
+            "citations": [{"citation_id": "[1]", "source": "invoice.md"}],
+            "temporal_comparison": {
+                "current_version": "v1",
+                "previous_version": None,
+                "previous_found": False,
+                "changed": False,
+                "added": [],
+                "removed": [],
+            },
+        }
+
+    register_tool(registry, "rag_search", rag_search, required=("query",))
+    result = run(KnowledgeAgent(registry).execute(
+        DialogueState(active_intent="billing"),
+        "如何开发票",
+    ))
+
+    assert result.success
+    assert "30 天内申请电子发票" in result.response
+    assert "版本" not in result.response
+
+
 def test_knowledge_agent_excludes_skill_but_uses_memory_in_retrieval_query():
     registry = ToolRegistry()
     queries = []

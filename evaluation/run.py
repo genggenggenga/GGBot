@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 from dataclasses import asdict
+from datetime import datetime
 
 from evaluation.local_eval_runner import run_local_eval, write_json_report, write_markdown_report
 
@@ -31,7 +32,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
-        default=pathlib.Path("data/eval/reports"),
+        default=None,
+        help="报告输出目录（默认 data/eval/reports/<日期>）",
     )
     parser.add_argument(
         "--no-write",
@@ -80,10 +82,14 @@ async def _run(args: argparse.Namespace) -> int:
         judge=judge,
     )
     if not args.no_write:
-        args.output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = args.output_dir or (
+            pathlib.Path("data/eval/reports")
+            / datetime.now().date().isoformat()
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
         base = f"{args.suite}-{args.mode}"
-        write_json_report(report, args.output_dir / f"{base}.json")
-        write_markdown_report(report, path=args.output_dir / f"{base}.md")
+        write_json_report(report, output_dir / f"{base}.json")
+        write_markdown_report(report, path=output_dir / f"{base}.md")
     print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
     return 0
 

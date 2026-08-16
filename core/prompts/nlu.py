@@ -78,6 +78,17 @@ _EXAMPLES = [
         },
     },
     {
+        "input": "怎么申请退款",
+        "output": {
+            "intent": "refund_policy",
+            "intents": ["refund_policy"],
+            "confidence": 0.92,
+            "slots": {},
+            "user_act": "ask",
+            "corrected_slots": [],
+        },
+    },
+    {
         "input": "不对，订单号是 ORD-1002",
         "output": {
             "intent": "refund_request",

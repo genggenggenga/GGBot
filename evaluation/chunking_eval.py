@@ -17,7 +17,7 @@ from rag.tokenization import count_tokens
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _DEFAULT_CASES = _ROOT / "data" / "eval" / "rag_chunking_cases.json"
-_REPORTS_DIR = _ROOT / "data" / "eval" / "reports"
+_REPORTS_DIR = _ROOT / "data" / "eval" / "reports" / datetime.now().date().isoformat()
 _DEFAULT_JSON_REPORT = _REPORTS_DIR / "chunking.json"
 _DEFAULT_MD_REPORT = _REPORTS_DIR / "chunking.md"
 
@@ -39,6 +39,7 @@ class ChunkingEvalReport:
     generated_at: str
     dataset: str
     reproduce_command: str
+    strategy: str
     chunk_size_tokens: int
     chunk_overlap_tokens: int
     document_count: int
@@ -111,6 +112,11 @@ def run_chunking_eval(
         generated_at=datetime.now(timezone.utc).isoformat(),
         dataset=dataset,
         reproduce_command=command,
+        strategy=(
+            "generic_recursive"
+            "（load_document + chunk_sections，按 token 预算切分；"
+            "GGKB 类型化整块策略见 enterprise_rag 评测）"
+        ),
         chunk_size_tokens=config.chunk_size,
         chunk_overlap_tokens=config.chunk_overlap,
         document_count=len(payload["documents"]),
@@ -245,6 +251,7 @@ def write_reports(
             "",
             f"- 生成时间：{report.generated_at}",
             f"- 数据集：`{report.dataset}`",
+            f"- 切块策略：{report.strategy}",
             f"- 参数：chunk={report.chunk_size_tokens} tokens，"
             f"overlap={report.chunk_overlap_tokens} tokens",
             f"- 文档/Chunk/用例：{report.document_count} / "

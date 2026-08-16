@@ -28,7 +28,11 @@ from core.prompts.legacy import build_entity_prompt, build_intent_prompt
 from core.prompts.types import PromptSpec
 
 from core.nlu_fast_track import fast_track_extract, build_understanding_from_fast_track
-from core.nlu_llm import understand_with_llm, make_fallback_understanding
+from core.nlu_llm import (
+    NLUServiceUnavailable,
+    understand_with_llm,
+    make_fallback_understanding,
+)
 from core.agent_models import (
     INTENT_SCHEMAS,
     UnderstandingResult,
@@ -306,7 +310,7 @@ class IntentRecognizer:
                 if fast_track_result is not None
                 else list(result.extracted_slots)
             )
-            validated_slots = await self._validated_llm_slots(
+            validated_slots, rejected_slots = await self._validated_llm_slots(
                 message,
                 result.extracted_slots,
                 slots_to_validate,
@@ -325,8 +329,9 @@ class IntentRecognizer:
                 result = fast_track_result.model_copy(update={
                     "extracted_slots": merged_slots,
                     "corrected_slots": corrected_slots,
+                    "rejected_slots": rejected_slots,
                 })
-            elif validated_slots != result.extracted_slots:
+            elif validated_slots != result.extracted_slots or rejected_slots:
                 result = result.model_copy(update={
                     "extracted_slots": validated_slots,
                     "corrected_slots": [
@@ -334,8 +339,19 @@ class IntentRecognizer:
                         for slot in result.corrected_slots
                         if slot in validated_slots
                     ],
+                    "rejected_slots": rejected_slots,
                 })
             return self._normalize_intent_transition(result, current_state)
+        except NLUServiceUnavailable:
+            # LLM 后端不可用：若 fast-track 有关键词证据则降级使用，否则向上抛出
+            # 让 runtime 返回"服务暂不可用"提示，而非误导用户意图不明确。
+            if fast_track_result is not None:
+                logger.info(
+                    "LLM unavailable, degrading to fast-track result for: %s",
+                    message[:60],
+                )
+                return fast_track_result
+            raise
         except Exception as ex:
             logger.warning(f"recognize_structured LLM call failed: {ex}")
             return fast_track_result or make_fallback_understanding(
@@ -353,8 +369,16 @@ class IntentRecognizer:
         message: str,
         extracted_slots: Dict[str, Any],
         allowed_slots: List[str],
-    ) -> Dict[str, str]:
+    ) -> tuple[Dict[str, str], Dict[str, str]]:
+        """Return (validated_slots, rejected_slots).
+
+        rejected_slots captures values that were extracted from the user
+        message but failed business validation (e.g. order ID not found),
+        so the runtime can tell the user their input is wrong instead of
+        silently re-prompting for the same slot.
+        """
         validated: Dict[str, str] = {}
+        rejected: Dict[str, str] = {}
         validator = getattr(self, "_slot_validator", None)
         for slot_name in allowed_slots:
             value = self._grounded_slot_value(
@@ -366,6 +390,7 @@ class IntentRecognizer:
             if validator is not None:
                 try:
                     if not await validator(slot_name, value):
+                        rejected[slot_name] = value
                         continue
                 except Exception as ex:
                     logger.warning(
@@ -373,9 +398,10 @@ class IntentRecognizer:
                         slot_name,
                         ex,
                     )
+                    rejected[slot_name] = value
                     continue
             validated[slot_name] = value
-        return validated
+        return validated, rejected
 
     @staticmethod
     def _grounded_slot_value(

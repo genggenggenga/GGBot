@@ -19,7 +19,7 @@ from rag.versioning import MAX_TIMESTAMP, KnowledgeStatus, RetrievalFilter
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _DEFAULT_CASES = _ROOT / "data" / "eval" / "enterprise_rag_cases.json"
-_REPORTS_DIR = _ROOT / "data" / "eval" / "reports" / "enterprise_rag"
+_REPORTS_DIR = _ROOT / "data" / "eval" / "reports" / datetime.now().date().isoformat()
 _DEFAULT_JSON_REPORT = _REPORTS_DIR / "enterprise_rag.json"
 _DEFAULT_MD_REPORT = _REPORTS_DIR / "enterprise_rag.md"
 

@@ -222,7 +222,9 @@ class HybridRetriever:
                     raise RuntimeError("reranker returned mismatched score count")
                 for hit, score in zip(candidates, scores):
                     hit.rerank_score = score
-                    hit.score = score + (hit.metadata_boost_score or 0.0)
+                    hit.score = score * (
+                        1.0 + (hit.metadata_boost_score or 0.0)
+                    )
                 candidates.sort(key=lambda hit: hit.score, reverse=True)
                 reranked = True
             except Exception as ex:
@@ -417,7 +419,9 @@ def _apply_metadata_boost(
         boost = _metadata_boost(query, hit.chunk)
         hit.metadata_boost_score = boost if boost else None
         if boost:
-            hit.score += boost
+            # 提升按基础分数比例生效，避免固定绝对值（0.02-0.15）盖过
+            # RRF 融合分数（约 0.025-0.033）造成跨 10+ 名的乱序。
+            hit.score = hit.score * (1.0 + boost)
             boosted += 1
             total += boost
     return {
