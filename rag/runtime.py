@@ -11,6 +11,7 @@ from rag.indexes import (
     ChromaDenseIndex,
 )
 from rag.loaders import ChunkingConfig, chunk_sections, load_document
+from rag.markdown_ingest import chunks_from_annotated_markdown
 from rag.models import DocumentChunk, LoadedSection
 from rag.retriever import (
     CrossEncoderReranker,
@@ -167,6 +168,24 @@ class KnowledgeRuntime:
             ]
             return self.add_sections(sections)
 
+    def add_markdown_file(
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".md", ".markdown"}:
+            raise ValueError("knowledge upload only supports Markdown files")
+        chunks = chunks_from_annotated_markdown(
+            filename,
+            content,
+            chunking_config=self._chunking_config,
+            metadata_overrides=metadata,
+        )
+        return self.add_chunks(chunks)
+
     def add_sections(self, sections: Iterable[LoadedSection]) -> int:
         loaded = [
             section.model_copy(update={
@@ -202,6 +221,20 @@ class KnowledgeRuntime:
                 for section in loaded
             ])
         if self._write_dense_on_ingest:
+            self.dense_index.add(chunks)
+        self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})
+        self.refresh()
+        return len(chunks)
+
+    def add_chunks(self, chunks: Sequence[DocumentChunk]) -> int:
+        if not chunks:
+            return 0
+        add_chunks = getattr(self.knowledge_base, "add_chunks", None)
+        if add_chunks is not None:
+            add_chunks(list(chunks))
+            if self._write_dense_on_ingest:
+                self.dense_index.add(chunks)
+        else:
             self.dense_index.add(chunks)
         self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})
         self.refresh()

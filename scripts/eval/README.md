@@ -8,6 +8,7 @@ project virtual environment.
 ./scripts/eval/run-bad-cases.sh
 ./scripts/eval/run-golden.sh
 ./scripts/eval/run-chunking.sh
+./scripts/eval/run-enterprise-rag.sh
 ./scripts/eval/run-all.sh
 ```
 
@@ -26,4 +27,5 @@ Additional arguments are passed to the underlying evaluator. For example:
 ```bash
 ./scripts/eval/run-golden.sh --no-write
 ./scripts/eval/run-chunking.sh --chunk-size 256 --chunk-overlap 32
+./scripts/eval/run-enterprise-rag.sh --no-write
 ```

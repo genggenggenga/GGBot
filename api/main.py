@@ -21,7 +21,7 @@ if _ROOT not in sys.path:
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Response, UploadFile, File
+from fastapi import FastAPI, Form, HTTPException, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
@@ -719,13 +719,18 @@ async def add_knowledge(body: BatchDocInput):
 
 
 @app.post("/knowledge/upload", tags=["知识库"])
-async def upload_knowledge(file: UploadFile = File(...)):
+async def upload_knowledge(
+    file: UploadFile = File(...),
+    version: Optional[str] = Form(None),
+):
     """
     上传文件导入知识库。
 
-    支持格式：
-    - `.txt` / `.md` / `.pdf`：使用结构感知 Loader 导入
-    - `.json`：JSON 数组格式 `[{"title": "...", "content": "..."}, ...]`
+    仅支持带 GGKB 标注块的 Markdown 文件，可通过 form 字段
+    `version` 指定知识版本并覆盖 frontmatter 中的 version。
+    上传后会执行：
+    文档解析 → 候选块生成 → 类型识别 → 类型化 chunking →
+    metadata 注入 → ChromaDB 入库。
 
     文件大小限制：10MB
     """
@@ -738,29 +743,21 @@ async def upload_knowledge(file: UploadFile = File(...)):
         raise HTTPException(413, "文件大小超过 10MB 限制")
 
     filename = file.filename or "unknown"
+    if pathlib.Path(filename).suffix.lower() not in {".md", ".markdown"}:
+        raise HTTPException(400, "知识库上传仅支持 Markdown 文件")
 
-    if filename.endswith(".json"):
-        import json as _json
-        text = content.decode("utf-8", errors="ignore")
-        try:
-            docs = _json.loads(text)
-            if not isinstance(docs, list):
-                raise HTTPException(400, "JSON 文件应为数组格式: [{title, content}, ...]")
-        except _json.JSONDecodeError as e:
-            raise HTTPException(400, f"JSON 解析失败: {e}")
+    version_value = version.strip() if isinstance(version, str) else ""
+    try:
         count = await asyncio.to_thread(
-            _knowledge_runtime.add_documents,
-            docs,
+            _knowledge_runtime.add_markdown_file,
+            filename,
+            content,
+            metadata={
+                "version": version_value,
+            } if version_value else None,
         )
-    else:
-        try:
-            count = await asyncio.to_thread(
-                _knowledge_runtime.add_file,
-                filename,
-                content,
-            )
-        except ValueError as ex:
-            raise HTTPException(400, str(ex)) from ex
+    except ValueError as ex:
+        raise HTTPException(400, str(ex)) from ex
     total = await asyncio.to_thread(lambda: kb.doc_count)
     return {
         "message": f"文件 {filename} 导入成功",

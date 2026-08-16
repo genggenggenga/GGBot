@@ -491,6 +491,17 @@ async def _execute_rag_case(
         use_reranker=(mode == "rerank"),
     )
     ranked_ids = [hit.chunk.chunk_id for hit in result.hits]
+    chunk_types = [
+        str(hit.chunk.metadata.get("chunk_type", ""))
+        for hit in result.hits
+    ]
+    parent_context_ids: List[str] = []
+    parent_contexts = getattr(retriever, "parent_contexts", None)
+    if parent_contexts is not None and result.hits:
+        try:
+            parent_context_ids = list(parent_contexts(result.hits))
+        except Exception:
+            parent_context_ids = []
     citations = [
         {
             **citation.model_dump(mode="json"),
@@ -511,7 +522,18 @@ async def _execute_rag_case(
         case_id=case["id"],
         category=case["category"],
         risk_level=case.get("risk_level", "normal"),
-        predicted_slots={"ranked_ids": ranked_ids, "relevant_ids": list(relevant_ids)},
+        predicted_slots={
+            "ranked_ids": ranked_ids,
+            "relevant_ids": list(relevant_ids),
+            "chunk_types": chunk_types,
+            "parent_context_ids": parent_context_ids,
+            "rerank_fallback": bool(result.metadata.get("rerank_fallback")),
+            "metadata_boosted": int(result.metadata.get("metadata_boosted", 0)),
+        },
+        expected_slots={
+            "expected_chunk_types": list(case.get("expected_chunk_types", [])),
+            "expected_parent_ids": list(case.get("expected_parent_ids", [])),
+        },
         required_evidence_ids=list(case.get("required_evidence_ids", relevant_ids)),
         citations=citations,
         grounded=grounded,
@@ -667,6 +689,43 @@ def _compute_intent_metrics(results: List[CaseResult]) -> Dict[str, Any]:
             "total": len(pairs), "correct": correct, "per_class": per_class}
 
 
+def _chunk_type_recall(results: List[CaseResult]) -> float:
+    values = []
+    for result in results:
+        expected = set(result.expected_slots.get("expected_chunk_types", []))
+        if not expected:
+            continue
+        predicted = set(result.predicted_slots.get("chunk_types", []))
+        values.append(len(expected & predicted) / len(expected))
+    return sum(values) / len(values) if values else 0.0
+
+
+def _guardrail_recall(results: List[CaseResult]) -> float:
+    values = []
+    for result in results:
+        expected = set(result.expected_slots.get("expected_chunk_types", []))
+        if "guardrail" not in expected:
+            continue
+        predicted = set(result.predicted_slots.get("chunk_types", []))
+        values.append(1.0 if "guardrail" in predicted else 0.0)
+    return sum(values) / len(values) if values else 0.0
+
+
+def _parent_context_recall(results: List[CaseResult]) -> float:
+    values = []
+    for result in results:
+        expected = set(result.expected_slots.get("expected_parent_ids", []))
+        if not expected:
+            continue
+        predicted = set(result.predicted_slots.get("parent_context_ids", []))
+        values.append(len(expected & predicted) / len(expected))
+    return sum(values) / len(values) if values else 0.0
+
+
+def _rate(values: Sequence[bool]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
 def _compute_all_metrics(
     all_results: Dict[str, List[CaseResult]],
 ) -> Dict[str, Any]:
@@ -704,6 +763,17 @@ def _compute_all_metrics(
     rag_ranked = [r.predicted_slots.get("ranked_ids", []) for r in rag_cases]
     r_at_5 = recall_at_k(rag_relevant, rag_ranked, 5) if rag_cases else 0.0
     mrr_val = mean_reciprocal_rank(rag_relevant, rag_ranked) if rag_cases else 0.0
+    chunk_type_rec = _chunk_type_recall(rag_cases)
+    guardrail_rec = _guardrail_recall(rag_cases)
+    parent_context_rec = _parent_context_recall(rag_cases)
+    rerank_fallback_rate = _rate([
+        bool(result.predicted_slots.get("rerank_fallback"))
+        for result in rag_cases
+    ])
+    metadata_boost_rate = _rate([
+        int(result.predicted_slots.get("metadata_boosted", 0)) > 0
+        for result in rag_cases
+    ])
 
     tool_data = [
         {"expected_tool": r.expected_tool, "predicted_tool": r.predicted_tool,
@@ -797,6 +867,11 @@ def _compute_all_metrics(
         "dst_joint_goal_accuracy": round(dst_jga, 4),
         "recall_at_5": round(r_at_5, 4),
         "mrr": round(mrr_val, 4),
+        "chunk_type_recall": round(chunk_type_rec, 4),
+        "guardrail_recall": round(guardrail_rec, 4),
+        "parent_context_recall": round(parent_context_rec, 4),
+        "rerank_fallback_rate": round(rerank_fallback_rate, 4),
+        "metadata_boost_rate": round(metadata_boost_rate, 4),
         "tool_selection_accuracy": tool_metrics["selection_accuracy"],
         "tool_parameter_accuracy": tool_metrics["parameter_accuracy"],
         "task_completion_rate": round(tcr, 4),

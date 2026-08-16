@@ -38,6 +38,7 @@ class SearchHit(BaseModel):
     bm25_score: Optional[float] = None
     rrf_score: Optional[float] = None
     rerank_score: Optional[float] = None
+    metadata_boost_score: Optional[float] = None
 
 
 class Citation(BaseModel):
@@ -64,6 +65,7 @@ class RetrievalResult(BaseModel):
     answered: bool
     reason: Optional[str] = None
     queries: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class QueryPlan(BaseModel):

@@ -60,6 +60,41 @@ def test_pdf_ingestion_updates_dense_and_bm25(monkeypatch, tmp_path):
     assert knowledge_base.chunks[0].page == 1
 
 
+def test_annotated_markdown_ingestion_updates_canonical_chunks_and_bm25():
+    knowledge_base = FakeKnowledgeBase()
+    dense = FakeDense()
+    sparse = BM25Index()
+    runtime = KnowledgeRuntime(
+        knowledge_base,
+        dense,
+        sparse,
+        SimpleNamespace(),
+    )
+    markdown = """---
+knowledge_id: enterprise-customer-service
+version: v1
+---
+
+<!-- GGKB:BEGIN type=faq id=refund.apply intent=refund_request -->
+## 退款申请 FAQ
+
+用户可以在订单详情页申请退款。
+<!-- GGKB:END -->
+""".encode("utf-8")
+
+    count = runtime.add_markdown_file(
+        "enterprise.md",
+        markdown,
+        metadata={"version": "v2"},
+    )
+
+    assert count == 1
+    assert knowledge_base.chunks[0].metadata["chunk_type"] == "faq"
+    assert knowledge_base.chunks[0].metadata["intent"] == "refund_request"
+    assert knowledge_base.chunks[0].metadata["version"] == "v2"
+    assert sparse.search("退款", 1)[0].chunk.metadata["chunk_type"] == "faq"
+
+
 def test_runtime_build_reuses_canonical_collection_and_wires_reranker(
     monkeypatch,
 ):
@@ -101,25 +136,37 @@ def test_runtime_build_reuses_canonical_collection_and_wires_reranker(
     assert runtime.retriever._reranker is not None
 
 
-def test_pdf_upload_endpoint_uses_runtime_loader(monkeypatch):
+def test_markdown_upload_endpoint_uses_annotated_runtime_loader(monkeypatch):
     class Runtime:
         def __init__(self):
             self.received = None
 
-        def add_file(self, filename, content):
-            self.received = (filename, content)
+        def add_markdown_file(self, filename, content, *, metadata=None):
+            self.received = (filename, content, metadata)
             return 2
 
     runtime = Runtime()
     kb = SimpleNamespace(doc_count=12)
     runtime.knowledge_base = kb
     monkeypatch.setattr(api_main, "_knowledge_runtime", runtime)
+    upload = UploadFile(file=BytesIO(b"markdown"), filename="policy.md")
+
+    result = asyncio.run(api_main.upload_knowledge(upload, version="v2"))
+
+    assert runtime.received == ("policy.md", b"markdown", {"version": "v2"})
+    assert result["added_chunks"] == 2
+
+
+def test_upload_endpoint_rejects_non_markdown(monkeypatch):
+    runtime = SimpleNamespace(knowledge_base=SimpleNamespace(doc_count=0))
+    monkeypatch.setattr(api_main, "_knowledge_runtime", runtime)
     upload = UploadFile(file=BytesIO(b"pdf-bytes"), filename="policy.pdf")
 
-    result = asyncio.run(api_main.upload_knowledge(upload))
+    with pytest.raises(api_main.HTTPException) as exc:
+        asyncio.run(api_main.upload_knowledge(upload))
 
-    assert runtime.received == ("policy.pdf", b"pdf-bytes")
-    assert result["added_chunks"] == 2
+    assert exc.value.status_code == 400
+    assert "Markdown" in exc.value.detail
 
 
 def test_chat_passes_ordered_memory_context_to_runtime(monkeypatch):

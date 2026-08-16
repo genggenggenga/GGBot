@@ -24,3 +24,8 @@ run_chunking() {
   cd "${ROOT_DIR}"
   exec "${PYTHON_BIN}" -m evaluation.chunking_eval "$@"
 }
+
+run_enterprise_rag() {
+  cd "${ROOT_DIR}"
+  exec "${PYTHON_BIN}" -m evaluation.enterprise_rag_eval "$@"
+}

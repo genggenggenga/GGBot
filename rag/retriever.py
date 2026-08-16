@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import os
+import re
+import logging
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 import httpx
 
 from rag.indexes import DenseIndex
 from rag.models import Citation, DocumentChunk, RetrievalResult, SearchHit
-from rag.versioning import RetrievalFilter
+from rag.versioning import RetrievalFilter, is_metadata_visible
+
+
+logger = logging.getLogger(__name__)
 
 
 class SparseIndex(Protocol):
@@ -113,6 +118,7 @@ class HybridRetriever:
         dense_threshold: float = 0.2,
         rrf_threshold: float = 0.01,
         rerank_threshold: float = 0.1,
+        metadata_boost_enabled: bool = True,
     ) -> None:
         self._dense = dense_index
         self._sparse = sparse_index
@@ -125,6 +131,7 @@ class HybridRetriever:
         self._dense_threshold = dense_threshold
         self._rrf_threshold = rrf_threshold
         self._rerank_threshold = rerank_threshold
+        self._metadata_boost_enabled = metadata_boost_enabled
 
     def add(self, chunks: Sequence[DocumentChunk]) -> None:
         self._dense.add(chunks)
@@ -170,6 +177,11 @@ class HybridRetriever:
                 answered=False,
                 reason="empty_query",
             )
+        diagnostics: Dict[str, Any] = {
+            "rerank_fallback": False,
+            "metadata_boosted": 0,
+            "metadata_boost_total": 0.0,
+        }
         active_filter = filters or RetrievalFilter.current()
         ranked_lists: List[Sequence[SearchHit]] = []
         for query in unique_queries:
@@ -194,17 +206,32 @@ class HybridRetriever:
                 rrf_k=self._rrf_k,
             )
 
-        reranked = bool(use_reranker and self._reranker and candidates)
-        if reranked:
-            ranking_query = rerank_query or unique_queries[0]
-            scores = self._reranker.score(
-                ranking_query,
-                [hit.chunk for hit in candidates],
-            )
-            for hit, score in zip(candidates, scores):
-                hit.rerank_score = score
-                hit.score = score
-            candidates.sort(key=lambda hit: hit.score, reverse=True)
+        ranking_query = rerank_query or unique_queries[0]
+        if self._metadata_boost_enabled:
+            diagnostics.update(_apply_metadata_boost(ranking_query, candidates))
+        candidates.sort(key=lambda hit: hit.score, reverse=True)
+
+        reranked = False
+        if use_reranker and self._reranker and candidates:
+            try:
+                scores = self._reranker.score(
+                    ranking_query,
+                    [hit.chunk for hit in candidates],
+                )
+                if len(scores) != len(candidates):
+                    raise RuntimeError("reranker returned mismatched score count")
+                for hit, score in zip(candidates, scores):
+                    hit.rerank_score = score
+                    hit.score = score + (hit.metadata_boost_score or 0.0)
+                candidates.sort(key=lambda hit: hit.score, reverse=True)
+                reranked = True
+            except Exception as ex:
+                diagnostics["rerank_fallback"] = True
+                diagnostics["rerank_fallback_reason"] = type(ex).__name__
+                logger.warning(
+                    "RAG reranker failed, falling back to fused ranking: %s",
+                    ex,
+                )
 
         selected = candidates[:top_k]
         threshold = (
@@ -218,6 +245,7 @@ class HybridRetriever:
                 answered=False,
                 reason="no_relevant_evidence",
                 queries=unique_queries,
+                metadata=diagnostics,
             )
 
         citations = [
@@ -241,7 +269,38 @@ class HybridRetriever:
             citations=citations,
             answered=True,
             queries=unique_queries,
+            metadata=diagnostics,
         )
+
+    def parent_contexts(
+        self,
+        hits: Sequence[SearchHit],
+        *,
+        filters: Optional[RetrievalFilter] = None,
+    ) -> Dict[str, DocumentChunk]:
+        parent_ids = {
+            hit.chunk.parent_id
+            for hit in hits
+            if hit.chunk.parent_id
+            and hit.chunk.metadata.get("chunk_type") != "section_parent"
+        }
+        if not parent_ids:
+            return {}
+        chunks = getattr(self._sparse, "_chunks", [])
+        active_filter = filters or RetrievalFilter.current()
+        parents: Dict[str, DocumentChunk] = {}
+        for chunk in chunks:
+            if chunk.parent_id not in parent_ids:
+                continue
+            if chunk.metadata.get("chunk_type") != "section_parent":
+                continue
+            if not is_metadata_visible(
+                {**chunk.metadata, "source": chunk.source, "title": chunk.title},
+                active_filter,
+            ):
+                continue
+            parents[chunk.parent_id] = chunk
+        return parents
 
     @staticmethod
     def _search_index(
@@ -316,3 +375,83 @@ def reciprocal_rank_fusion_many(
         hit.rrf_score = scores[chunk_id]
         hit.score = scores[chunk_id]
     return sorted(merged.values(), key=lambda hit: hit.score, reverse=True)
+
+
+_INTENT_KEYWORDS = {
+    "refund_request": ("退款", "退货", "售后", "退回", "仅退款"),
+    "logistics_delay": ("物流", "延迟", "没收到", "配送", "快递", "补偿"),
+    "coupon_issue": ("优惠券", "券", "过期", "补发"),
+    "invoice_request": ("发票", "开票", "税号", "抬头"),
+    "privacy_protection": ("隐私", "手机号", "身份证", "地址", "别人", "他人"),
+    "write_action_confirmation": (
+        "直接退",
+        "帮我退",
+        "取消",
+        "改地址",
+        "补发",
+        "赔付",
+        "执行",
+    ),
+    "human_handoff": ("人工", "投诉", "升级", "客服", "工单"),
+}
+_DOMAIN_KEYWORDS = {
+    "after_sales": ("退款", "退货", "售后", "换货"),
+    "logistics": ("物流", "快递", "配送", "签收"),
+    "membership": ("会员", "积分", "优惠券"),
+    "order_payment": ("订单", "支付", "发票"),
+    "safety": ("隐私", "确认", "越权", "安全", "密码"),
+}
+_GUARDRAIL_PATTERN = re.compile(
+    r"(直接|立刻|马上|确认|取消|退款|改地址|补发|赔付|手机号|身份证|他人|别人|隐私|密码)"
+)
+_TABLE_PATTERN = re.compile(r"(标准|多少|金额|补偿|费用|时效|等级|规则)")
+
+
+def _apply_metadata_boost(
+    query: str,
+    hits: Sequence[SearchHit],
+) -> Dict[str, Any]:
+    boosted = 0
+    total = 0.0
+    for hit in hits:
+        boost = _metadata_boost(query, hit.chunk)
+        hit.metadata_boost_score = boost if boost else None
+        if boost:
+            hit.score += boost
+            boosted += 1
+            total += boost
+    return {
+        "metadata_boosted": boosted,
+        "metadata_boost_total": round(total, 6),
+    }
+
+
+def _metadata_boost(query: str, chunk: DocumentChunk) -> float:
+    text = query.lower()
+    metadata = chunk.metadata
+    chunk_type = str(metadata.get("chunk_type", "")).lower()
+    boost = 0.0
+
+    if chunk_type == "section_parent":
+        boost -= 0.02
+    if (
+        chunk_type == "guardrail"
+        or metadata.get("guardrail") is True
+        or str(metadata.get("risk_level", "")).lower() == "high"
+    ) and _GUARDRAIL_PATTERN.search(query):
+        boost += 0.15
+    intent = str(metadata.get("intent", "")).lower()
+    if any(keyword in query for keyword in _INTENT_KEYWORDS.get(intent, ())):
+        boost += 0.08
+    domain = str(metadata.get("business_domain", "")).lower()
+    if any(keyword in query for keyword in _DOMAIN_KEYWORDS.get(domain, ())):
+        boost += 0.04
+    if chunk_type == "table" and _TABLE_PATTERN.search(query):
+        boost += 0.04
+    if chunk_type == "policy_rule" and any(
+        keyword in query for keyword in ("规则", "政策", "能不能", "是否", "不支持")
+    ):
+        boost += 0.03
+    if intent and intent.replace("_", " ") in text:
+        boost += 0.03
+    return round(boost, 6)

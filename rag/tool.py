@@ -93,7 +93,7 @@ def execute_rag_search(
         params["query"],
     )
     if temporal_mode != "compare_previous" or not result.answered:
-        payload = result.model_dump(mode="json")
+        payload = _payload_with_parent_contexts(retriever, result, current_filter)
         payload["temporal_mode"] = temporal_mode
         return payload
 
@@ -157,6 +157,57 @@ def _search(
             use_sparse=mode != "dense",
             use_reranker=mode == "rerank",
         )
+
+
+def _payload_with_parent_contexts(
+    retriever: Any,
+    result: Any,
+    filters: RetrievalFilter,
+) -> Dict[str, Any]:
+    payload = result.model_dump(mode="json")
+    parent_contexts = _parent_contexts(retriever, result, filters)
+    if not parent_contexts:
+        payload.setdefault("metadata", {})["parent_context_count"] = 0
+        return payload
+    attached = 0
+    for hit in payload.get("hits", []):
+        chunk = hit.get("chunk") if isinstance(hit, dict) else None
+        chunk = chunk if isinstance(chunk, dict) else {}
+        parent_id = chunk.get("parent_id")
+        parent = parent_contexts.get(parent_id)
+        if not parent:
+            continue
+        hit["parent_context"] = parent
+        attached += 1
+    payload.setdefault("metadata", {})["parent_context_count"] = attached
+    return payload
+
+
+def _parent_contexts(
+    retriever: Any,
+    result: Any,
+    filters: RetrievalFilter,
+) -> Dict[str, Dict[str, Any]]:
+    loader = getattr(retriever, "parent_contexts", None)
+    if loader is None or not getattr(result, "hits", None):
+        return {}
+    try:
+        parents = loader(result.hits, filters=filters)
+    except Exception:
+        return {}
+    values = {}
+    for parent_id, chunk in parents.items():
+        values[parent_id] = {
+            "chunk_id": chunk.chunk_id,
+            "content": chunk.content,
+            "source": chunk.source,
+            "title": chunk.title,
+            "section": chunk.section,
+            "page": chunk.page,
+            "parent_id": chunk.parent_id,
+            "metadata": chunk.metadata,
+        }
+    return values
 
 
 def _resolve_temporal_mode(mode: str, query: str) -> str:

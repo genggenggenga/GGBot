@@ -123,6 +123,11 @@ class TestRunLocalEval:
         assert "dst_joint_goal_accuracy" in report.summary
         assert "recall_at_5" in report.summary
         assert "mrr" in report.summary
+        assert "chunk_type_recall" in report.summary
+        assert "guardrail_recall" in report.summary
+        assert "parent_context_recall" in report.summary
+        assert "rerank_fallback_rate" in report.summary
+        assert "metadata_boost_rate" in report.summary
         assert "tool_selection_accuracy" in report.summary
         assert "tool_parameter_accuracy" in report.summary
         assert "task_completion_rate" in report.summary

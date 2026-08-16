@@ -406,6 +406,50 @@ def test_retriever_uses_mode_specific_thresholds():
     assert rerank_result.answered is False
 
 
+def test_reranker_failure_falls_back_to_existing_ranking():
+    class FailingReranker:
+        def score(self, query, chunks):
+            raise RuntimeError("reranker unavailable")
+
+    chunk = make_chunk("a", "七天内可退款")
+    dense = FakeDenseIndex([SearchHit(chunk=chunk, score=0.7, dense_score=0.7)])
+    retriever = HybridRetriever(dense, BM25Index(), reranker=FailingReranker())
+
+    result = retriever.search("退款", use_sparse=False, use_reranker=True)
+
+    assert result.answered is True
+    assert result.hits[0].chunk.chunk_id == "a"
+    assert result.metadata["rerank_fallback"] is True
+    assert result.metadata["rerank_fallback_reason"] == "RuntimeError"
+
+
+def test_metadata_boost_prioritizes_guardrail_for_write_query():
+    normal = make_chunk("normal", "退款到账时间是五到七个工作日")
+    guardrail = make_chunk("guardrail", "退款前必须获得用户明确确认")
+    guardrail.metadata.update({
+        "chunk_type": "guardrail",
+        "guardrail": True,
+        "risk_level": "high",
+        "intent": "write_action_confirmation",
+    })
+    dense = FakeDenseIndex([
+        SearchHit(chunk=normal, score=0.3, dense_score=0.3),
+        SearchHit(chunk=guardrail, score=0.3, dense_score=0.3),
+    ])
+    retriever = HybridRetriever(dense, BM25Index())
+
+    result = retriever.search(
+        "帮我直接退款",
+        use_sparse=False,
+        use_reranker=False,
+    )
+
+    assert result.answered is True
+    assert result.hits[0].chunk.chunk_id == "guardrail"
+    assert result.hits[0].metadata_boost_score > 0
+    assert result.metadata["metadata_boosted"] >= 1
+
+
 @pytest.mark.asyncio
 async def test_rag_search_is_registered_as_read_only_tool():
     chunk = make_chunk("a", "七天内可退款")
@@ -424,6 +468,43 @@ async def test_rag_search_is_registered_as_read_only_tool():
     assert result.success is True
     assert result.data["answered"] is True
     assert result.data["citations"][0]["source"] == "policy.md"
+
+
+@pytest.mark.asyncio
+async def test_rag_search_attaches_parent_context_to_child_hit():
+    child = make_chunk("step", "第一步：核验订单状态")
+    child.parent_id = "refund_sop"
+    child.metadata.update({
+        "chunk_type": "sop",
+        "intent": "refund_request",
+    })
+    parent = make_chunk("parent", "完整退款流程：核验订单，确认动作，执行退款")
+    parent.parent_id = "refund_sop"
+    parent.metadata.update({
+        "chunk_type": "section_parent",
+        "intent": "refund_request",
+    })
+    sparse = BM25Index()
+    sparse.add([child, parent])
+    dense = FakeDenseIndex([
+        SearchHit(chunk=child, score=0.9, dense_score=0.9),
+    ])
+    registry = ToolRegistry()
+    register_rag_tool(
+        registry,
+        HybridRetriever(dense, sparse),
+        agent_names=["knowledge"],
+    )
+
+    result = await registry.call(
+        "knowledge",
+        "rag_search",
+        {"query": "退款流程", "mode": "dense", "top_k": 1},
+    )
+
+    assert result.success is True
+    assert result.data["hits"][0]["parent_context"]["chunk_id"] == "parent"
+    assert result.data["metadata"]["parent_context_count"] == 1
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,23 @@ def test_answer_generator_deduplicates_and_enforces_context_budget():
     assert sum(count_tokens(item["content"]) for item in evidence) <= 15
 
 
+def test_answer_generator_includes_parent_context_in_evidence():
+    async def llm_call(prompt):
+        raise AssertionError("not called")
+
+    generator = RAGAnswerGenerator(llm_call)
+    hit = _hit("chunk-1", "第一步：核验订单状态。")
+    hit["parent_context"] = {
+        "chunk_id": "parent-1",
+        "content": "完整退款流程：核验订单，确认动作，执行退款。",
+    }
+
+    evidence, _ = generator.assemble_evidence([hit], [_citation(1)])
+
+    assert "[父级上下文]" in evidence[0]["content"]
+    assert "完整退款流程" in evidence[0]["content"]
+
+
 @pytest.mark.asyncio
 async def test_answer_generator_respects_insufficient_evidence_decision():
     async def llm_call(prompt):

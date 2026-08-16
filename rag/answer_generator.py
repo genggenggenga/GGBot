@@ -152,6 +152,19 @@ class RAGAnswerGenerator:
             ).strip()
             if not content:
                 continue
+            parent_context = (
+                hit.get("parent_context")
+                if isinstance(hit, dict)
+                else None
+            )
+            if isinstance(parent_context, dict):
+                parent_content = str(parent_context.get("content") or "").strip()
+                if (
+                    parent_content
+                    and parent_content != content
+                    and parent_content not in content
+                ):
+                    content = f"{content}\n\n[父级上下文]\n{parent_content}"
             chunk_id = str(chunk.get("chunk_id") or "")
             normalized = re.sub(r"\s+", " ", content).strip().lower()
             if (chunk_id and chunk_id in seen_chunks) or normalized in seen_content:
