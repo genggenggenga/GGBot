@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -220,6 +221,7 @@ class MemoryManager:
         base_url:     Optional[str] = None,
         model:        str = "claude-3-5-sonnet-20241022",
         state_store:  Optional["StateStore"] = None,
+        durable_store: Optional[Any] = None,
         structured_client: Optional[Any] = None,
         # 测试用注入点
         redis_client: Optional[Any] = None,
@@ -232,6 +234,7 @@ class MemoryManager:
         self._client = AsyncAnthropic(**kwargs)
         self._model  = model
         self._state_store = state_store
+        self._durable_store = durable_store
         self._structured_client = structured_client
 
         # Redis 客户端（支持注入 fake）
@@ -359,7 +362,8 @@ class MemoryManager:
             existing = await self._get_profile(user_id)
             merged = self._merge_profile(existing, filtered)
 
-            snapshot_id = f"{user_id}_profile"
+            profile_version_id = str(uuid.uuid4())
+            snapshot_id = f"{user_id}_profile_{profile_version_id}"
             ids = [snapshot_id]
             documents = [
                 self._safe_text(json.dumps(merged, ensure_ascii=False)),
@@ -367,6 +371,7 @@ class MemoryManager:
             metadatas = [{
                 "user_id": user_id,
                 "profile_kind": "snapshot",
+                "profile_version_id": profile_version_id,
                 "ts": datetime.now().isoformat(),
             }]
             for index, (document, payload) in enumerate(
@@ -378,6 +383,7 @@ class MemoryManager:
                 metadatas.append({
                     "user_id": user_id,
                     "profile_kind": "fragment",
+                    "profile_version_id": profile_version_id,
                     "profile_payload": json.dumps(
                         payload,
                         ensure_ascii=False,
@@ -385,19 +391,34 @@ class MemoryManager:
                     "ts": datetime.now().isoformat(),
                 })
 
-            existing = await _backend_call(
-                self._profile.get,
-                where={"user_id": user_id},
-            )
-            existing_ids = existing.get("ids", [])
-            if existing_ids:
-                await _backend_call(self._profile.delete, ids=existing_ids)
+            if self._durable_store is None:
+                existing = await _backend_call(
+                    self._profile.get,
+                    where={"user_id": user_id},
+                )
+                existing_ids = existing.get("ids", [])
+                if existing_ids:
+                    await _backend_call(self._profile.delete, ids=existing_ids)
             await _backend_call(
                 self._profile.add,
                 ids=ids,
                 documents=documents,
                 metadatas=metadatas,
             )
+            if self._durable_store is not None:
+                activate = getattr(
+                    self._durable_store,
+                    "activate_user_profile_version",
+                    None,
+                )
+                if activate is not None:
+                    await _backend_call(
+                        activate,
+                        user_id,
+                        snapshot_id,
+                        merged,
+                        profile_version_id=profile_version_id,
+                    )
             logger.info(f"用户稳定偏好已更新: {user_id}")
         except Exception as ex:
             logger.warning(f"更新用户画像失败: {ex}")
@@ -746,6 +767,52 @@ class MemoryManager:
     ) -> Dict[str, Any]:
         """Get the full snapshot or vector-relevant profile fragments."""
         try:
+            active_profile: Optional[Dict[str, Any]] = None
+            if self._durable_store is not None:
+                get_active = getattr(
+                    self._durable_store,
+                    "get_active_profile_version",
+                    None,
+                )
+                if get_active is not None:
+                    active_profile = await _backend_call(get_active, user_id)
+
+            if active_profile is not None:
+                version_id = active_profile["profile_version_id"]
+                if query.strip():
+                    try:
+                        results = await _backend_call(
+                            self._profile.query,
+                            query_texts=[self._safe_text(query)],
+                            n_results=self.PROFILE_TOP_K,
+                            where={
+                                "$and": [
+                                    {"user_id": {"$eq": user_id}},
+                                    {"profile_kind": {"$eq": "fragment"}},
+                                    {"profile_version_id": {"$eq": version_id}},
+                                ],
+                            },
+                        )
+                        metadatas = (
+                            results.get("metadatas", [[]])[0]
+                            if results.get("metadatas")
+                            else []
+                        )
+                        relevant: Dict[str, Any] = {}
+                        for metadata in metadatas:
+                            payload = (metadata or {}).get("profile_payload")
+                            if not payload:
+                                continue
+                            relevant = self._merge_profile(
+                                relevant,
+                                json.loads(payload),
+                            )
+                        if relevant:
+                            return relevant
+                    except Exception as ex:
+                        logger.warning(f"用户画像分片检索失败，回退到画像快照: {ex}")
+                return dict(active_profile["profile"])
+
             if query.strip():
                 results = await _backend_call(
                     self._profile.query,

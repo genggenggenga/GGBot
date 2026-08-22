@@ -5,6 +5,7 @@ GGBot 智能客服系统 — FastAPI 入口
 所有核心组件在 lifespan 中初始化，通过环境变量配置。
 """
 import asyncio
+import inspect
 import logging
 import os
 import pathlib
@@ -27,6 +28,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from core.conversation_lock import ConversationLockTimeout
+from core.persistence import ConversationOwnershipError
 
 load_dotenv()
 
@@ -54,6 +56,7 @@ _trace_store = None
 _knowledge_runtime = None
 _tool_registry = None
 _conversation_locks = None
+_persistence = None
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -73,7 +76,7 @@ def _anthropic_cfg() -> Dict[str, Any]:
 async def _runtime_components(app: FastAPI):
     global _memory, _monitor, _skill_manager
     global _customer_runtime, _trace_store, _knowledge_runtime
-    global _tool_registry, _conversation_locks
+    global _tool_registry, _conversation_locks, _persistence
 
     # CLI 模式下由 _cli() 负责打印横幅与欢迎语，避免重复输出。
     if "--cli" not in sys.argv:
@@ -93,6 +96,7 @@ async def _runtime_components(app: FastAPI):
     from core.dialogue_state_tracker import DialogueStateTracker
     from core.idempotency import RedisActionExecutionRepository
     from core.internal_rpc import build_mock_rpc_clients
+    from core.persistence import SQLitePersistence
     from core.intent_recognizer import IntentRecognizer
     from core.react_planner import ReActPlanner
     from core.response_polisher import ResponsePolisher
@@ -146,6 +150,13 @@ async def _runtime_components(app: FastAPI):
         os.getenv("REDIS_URL", "redis://redis:6379/0"),
         decode_responses=True,
     )
+    _persistence = await asyncio.to_thread(
+        SQLitePersistence,
+        os.getenv(
+            "GGBOT_PERSISTENCE_PATH",
+            str(pathlib.Path(_ROOT) / "data" / "ggbot.sqlite3"),
+        ),
+    )
     _conversation_locks = RedisConversationLockManager(
         redis_client,
         lease_s=float(os.getenv("CONVERSATION_LOCK_LEASE_S", "60")),
@@ -166,6 +177,7 @@ async def _runtime_components(app: FastAPI):
         base_url=cfg.get("base_url"),
         model=cfg["model"],
         state_store=state_store,
+        durable_store=_persistence,
         structured_client=structured_client,
         redis_client=redis_client,
     )
@@ -310,8 +322,8 @@ async def _runtime_components(app: FastAPI):
         return result.success and payload.get("found") is True
 
     recognizer.set_slot_validator(validate_recovered_slot)
-    turn_engine = TurnEngine(state_store)
-    _trace_store = TraceStore()
+    turn_engine = TurnEngine(state_store, checkpoint_store=_persistence)
+    _trace_store = TraceStore(durable_store=_persistence)
     _customer_runtime = CustomerAgentRuntime(
         recognizer=recognizer,
         tracker=DialogueStateTracker(),
@@ -349,12 +361,15 @@ async def _shutdown_components() -> None:
     resources = (
         ("monitor", _monitor, "stop"),
         ("memory", _memory, "close"),
+        ("persistence", _persistence, "close"),
     )
     for name, resource, method_name in resources:
         if resource is None:
             continue
         try:
-            await getattr(resource, method_name)()
+            result = getattr(resource, method_name)()
+            if inspect.isawaitable(result):
+                await result
         except Exception as ex:
             logger.warning("关闭 %s 失败: %s", name, ex)
 
@@ -390,6 +405,8 @@ class ChatRequest(BaseModel):
     message:     str
     user_id:     str = "anonymous"
     conv_id:     Optional[str] = None
+    message_id:  Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -418,6 +435,23 @@ class MCPToolInfo(BaseModel):
 class MCPToolListResponse(BaseModel):
     total: int
     tools: List[MCPToolInfo] = Field(default_factory=list)
+
+
+async def _call_persistence(method_name: str, *args, **kwargs):
+    if _persistence is None:
+        return None
+    method = getattr(_persistence, method_name, None)
+    if method is None:
+        return None
+    return await asyncio.to_thread(method, *args, **kwargs)
+
+
+def _conversation_status(result_status: str, escalated: bool) -> str:
+    if escalated:
+        return "handoff"
+    if result_status == "failed":
+        return "failed"
+    return "active"
 
 
 # ── 路由 ──────────────────────────────────────────────────────────────────────
@@ -497,7 +531,10 @@ async def chat(req: ChatRequest):
     if _customer_runtime is None or _memory is None:
         raise HTTPException(503, "服务未就绪")
 
-    conv_id = req.conv_id or str(uuid.uuid4())
+    conv_id = req.conv_id
+    if conv_id is None:
+        conv_id = await _call_persistence("get_active_conversation", req.user_id)
+    conv_id = conv_id or str(uuid.uuid4())
     if _conversation_locks is None:
         return await _chat_locked(req, conv_id)
     try:
@@ -513,6 +550,29 @@ async def chat(req: ChatRequest):
 async def _chat_locked(req: ChatRequest, conv_id: str) -> ChatResponse:
     """Execute one complete chat turn while the conversation lock is held."""
     from memory.conversation_memory import EpisodicEventType, MsgRole
+
+    try:
+        await _call_persistence(
+            "ensure_conversation",
+            req.user_id,
+            conv_id,
+            title=req.message[:80],
+        )
+    except ConversationOwnershipError as ex:
+        raise HTTPException(403, "会话不属于当前用户") from ex
+
+    user_message_id = req.message_id or str(uuid.uuid4())
+    idempotency_key = req.idempotency_key or req.message_id
+    await _call_persistence(
+        "record_message",
+        req.user_id,
+        conv_id,
+        MsgRole.USER.value,
+        req.message,
+        message_id=user_message_id,
+        metadata={"phase": "received"},
+        idempotency_key=idempotency_key,
+    )
 
     mem_ctx = await _memory.get_context(req.user_id, conv_id, query=req.message)
     history = [
@@ -533,10 +593,30 @@ async def _chat_locked(req: ChatRequest, conv_id: str) -> ChatResponse:
     )
     if agent_context:
         runtime_args["agent_context"] = agent_context
+    await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
     result = await _customer_runtime.run(**runtime_args)
 
-    await _memory.add_message(req.user_id, conv_id, MsgRole.USER, req.message)
+    await _call_persistence(
+        "record_message",
+        req.user_id,
+        conv_id,
+        MsgRole.ASSISTANT.value,
+        result.response,
+        metadata={
+            "trace_id": result.trace_id,
+            "intent": result.intent,
+            "agent_type": result.agent_type,
+            "status": result.status,
+        },
+    )
     await _memory.add_message(req.user_id, conv_id, MsgRole.ASSISTANT, result.response)
+    await _call_persistence(
+        "update_conversation",
+        req.user_id,
+        conv_id,
+        status=_conversation_status(result.status, result.escalated),
+        active_intent=result.intent,
+    )
     update_profile = getattr(_memory, "update_profile", None)
     if update_profile is not None:
         await update_profile(req.user_id, conv_id)

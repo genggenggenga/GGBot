@@ -5,6 +5,7 @@ short data_preview (up to 120 chars) are kept.  User text, full prompts,
 and hidden reasoning chains are never stored in the trace.
 """
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # Maximum characters kept from Observation.data in a trace event.
 _DATA_PREVIEW_LIMIT = 120
 _SUMMARY_LIMIT = 8
+logger = logging.getLogger(__name__)
 
 # Fields that must NEVER appear in a trace event.
 _FORBIDDEN_KEYS = frozenset({
@@ -190,16 +192,47 @@ class TraceStore:
     before persisting any event.
     """
 
-    def __init__(self, max_traces: int = 1000) -> None:
+    def __init__(
+        self,
+        max_traces: int = 1000,
+        durable_store: Optional[Any] = None,
+    ) -> None:
         self._max_traces = max_traces
         self._events: Dict[str, List[Dict[str, Any]]] = {}
+        self._durable_store = durable_store
 
-    def append(self, trace_id: str, event: Dict[str, Any]) -> None:
+    def append(
+        self,
+        trace_id: str,
+        event: Dict[str, Any],
+        *,
+        user_id: Optional[str] = None,
+        conv_id: Optional[str] = None,
+    ) -> None:
         if trace_id not in self._events and len(self._events) >= self._max_traces:
             self._events.pop(next(iter(self._events)))
         scrubbed = _scrub_event(event)
         payload = TraceEvent.model_validate(scrubbed).model_dump(mode="json")
         self._events.setdefault(trace_id, []).append(payload)
+        if self._durable_store is None:
+            return
+        record = getattr(self._durable_store, "record_trace_event", None)
+        if record is None:
+            return
+        try:
+            record(trace_id, payload, user_id=user_id, conv_id=conv_id)
+        except Exception as ex:
+            logger.warning("持久化 trace event 失败: %s", ex)
 
     def get(self, trace_id: str) -> List[Dict[str, Any]]:
-        return [dict(event) for event in self._events.get(trace_id, [])]
+        events = [dict(event) for event in self._events.get(trace_id, [])]
+        if events or self._durable_store is None:
+            return events
+        get_events = getattr(self._durable_store, "get_trace_events", None)
+        if get_events is None:
+            return []
+        try:
+            return get_events(trace_id)
+        except Exception as ex:
+            logger.warning("读取持久化 trace event 失败: %s", ex)
+            return []

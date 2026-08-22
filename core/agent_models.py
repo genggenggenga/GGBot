@@ -206,6 +206,7 @@ class TurnContext(BaseModel):
 
     user_id: str = Field(min_length=1)
     conv_id: str = Field(min_length=1)
+    trace_id: Optional[str] = None
     dialogue_state: DialogueState = Field(default_factory=DialogueState)
     execution_state: ExecutionState = ExecutionState.UNDERSTANDING
     state_history: List[ExecutionState] = Field(

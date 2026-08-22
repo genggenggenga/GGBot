@@ -1,5 +1,6 @@
 """Lightweight, explicit turn-level state machine for Agent execution."""
 import inspect
+import logging
 from typing import Awaitable, Callable, Dict, Set, Union
 
 from core.agent_models import (
@@ -13,6 +14,8 @@ from core.agent_models import (
     TurnEventType,
 )
 from core.state_store import StateStore
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidTransitionError(ValueError):
@@ -182,11 +185,17 @@ def apply_transition(context: TurnContext, transition: Transition) -> TurnContex
 class TurnEngine:
     """Run registered handlers until completion, failure, or user input is needed."""
 
-    def __init__(self, state_store: StateStore, max_steps: int = 6) -> None:
+    def __init__(
+        self,
+        state_store: StateStore,
+        max_steps: int = 6,
+        checkpoint_store: object | None = None,
+    ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
         self._state_store = state_store
         self._max_steps = max_steps
+        self._checkpoint_store = checkpoint_store
         self._handlers: Dict[ExecutionState, StateHandler] = {}
 
     def register(self, state: ExecutionState, handler: StateHandler) -> None:
@@ -196,7 +205,11 @@ class TurnEngine:
 
     def fork(self) -> "TurnEngine":
         """Create an isolated handler registry over the same state store."""
-        return TurnEngine(self._state_store, max_steps=self._max_steps)
+        return TurnEngine(
+            self._state_store,
+            max_steps=self._max_steps,
+            checkpoint_store=self._checkpoint_store,
+        )
 
     async def load_context(self, user_id: str, conv_id: str) -> TurnContext:
         """Restore persisted dialogue state and derive its resumable execution state."""
@@ -281,6 +294,15 @@ class TurnEngine:
             context.conv_id,
             context.dialogue_state,
         )
+        if self._checkpoint_store is None:
+            return
+        try:
+            record = getattr(self._checkpoint_store, "record_turn_checkpoint")
+            result = record(context)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as ex:
+            logger.warning("持久化 TurnCheckpoint 失败: %s", ex)
 
     @staticmethod
     def _fail(context: TurnContext, reason: str) -> TurnContext:

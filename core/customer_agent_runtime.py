@@ -154,6 +154,7 @@ class CustomerAgentRuntime:
         execution = TurnContext(
             user_id=user_id,
             conv_id=conv_id,
+            trace_id=trace_id,
             dialogue_state=dialogue_state,
             execution_state=execution_state,
             state_history=[execution_state],
@@ -192,7 +193,7 @@ class CustomerAgentRuntime:
             "confidence": understanding.confidence,
             "decision": "clarify" if intent_clarification else "accept",
             "state_version": dialogue_state.state_version,
-        })
+        }, user_id=user_id, conv_id=conv_id)
 
         completed = await engine.run(execution)
 
@@ -205,7 +206,7 @@ class CustomerAgentRuntime:
                 "success": result.success,
                 "tools": [obs.name for obs in result.observations],
                 "result_summary": result_summary,
-            })
+            }, user_id=user_id, conv_id=conv_id)
 
         polish_outcome = turn_data["polish_outcome"]
         if polish_outcome is not None:
@@ -216,7 +217,7 @@ class CustomerAgentRuntime:
                 "response_kind": turn_data["response_kind"].value,
                 "validation_error": polish_outcome.validation_error,
                 "latency_ms": polish_outcome.latency_ms,
-            })
+            }, user_id=user_id, conv_id=conv_id)
 
         # Trace: RAG-specific summary if rag_search was used
         rag_obs = [
@@ -227,7 +228,7 @@ class CustomerAgentRuntime:
             self._trace_store.append(trace_id, {
                 "event": "rag_retrieval",
                 "result_summary": summarize_observations(rag_obs),
-            })
+            }, user_id=user_id, conv_id=conv_id)
 
         # Trace: turn end with state path and latency
         self._trace_store.append(trace_id, {
@@ -236,7 +237,7 @@ class CustomerAgentRuntime:
             "state_path": [s.value for s in completed.state_history],
             "status": self._status(completed.execution_state),
             "latency_ms": (time.monotonic() - started) * 1000,
-        })
+        }, user_id=user_id, conv_id=conv_id)
 
         latency_ms = (time.monotonic() - started) * 1000
         for result in turn_data["results"]:
