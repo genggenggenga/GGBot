@@ -39,7 +39,7 @@ from rag.models import DocumentChunk
 logger = logging.getLogger(__name__)
 
 _EVAL_DIR = pathlib.Path(__file__).parent.parent / "data" / "eval"
-_REPORTS_DIR = _EVAL_DIR / "reports"
+_REPORTS_DIR = _EVAL_DIR / "reports" / datetime.now().date().isoformat()
 _CASES_FILE = _EVAL_DIR / "customer_agent_cases.json"
 _CORPUS_FILE = _EVAL_DIR / "knowledge" / "corpus-v1.json"
 _EVAL_DATE = date(2026, 8, 7)

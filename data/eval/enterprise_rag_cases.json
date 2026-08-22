@@ -1,0 +1,385 @@
+{
+  "description": "GGBot Enterprise RAG 评测集 v2：覆盖企业客服知识库 v1/v2 的检索、类型、安全护栏、父级上下文、版本对比与版本生效边界，含同义问法。",
+  "version": "enterprise-rag-v2",
+  "knowledge_files": [
+    "data/knowledge/enterprise_customer_service/v1/enterprise_customer_service_v1.md",
+    "data/knowledge/enterprise_customer_service/v2/enterprise_customer_service_v2.md"
+  ],
+  "cases": [
+    {
+      "id": "v1-seven-day-no-reason",
+      "query": "七天无理由退货需要满足什么条件",
+      "relevant_unit_ids": [
+        "refund.no_reason_7d"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "expected_version": "v1",
+      "as_of": "2026-02-15T00:00:00Z"
+    },
+    {
+      "id": "v2-fifteen-day-no-reason",
+      "query": "十五天无理由退货规则是什么",
+      "relevant_unit_ids": [
+        "refund.no_reason_15d"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "expected_version": "v2",
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-apply-howto",
+      "query": "怎么申请退款",
+      "relevant_unit_ids": [
+        "refund.apply"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-rejected-cases",
+      "query": "哪些情况不能直接退款",
+      "relevant_unit_ids": [
+        "refund.rejected_cases"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-sop-verify",
+      "query": "退款前需要核验哪些信息",
+      "relevant_unit_ids": [
+        "refund.sop.verify"
+      ],
+      "expected_chunk_types": [
+        "sop"
+      ],
+      "expected_parent_ids": [
+        "refund_sop"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-sop-confirm",
+      "query": "执行退款前必须获得用户明确确认吗",
+      "relevant_unit_ids": [
+        "refund.sop.confirm"
+      ],
+      "expected_chunk_types": [
+        "sop"
+      ],
+      "expected_parent_ids": [
+        "refund_sop"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "logistics-delay-compensation",
+      "query": "物流延迟补偿标准是什么",
+      "relevant_unit_ids": [
+        "logistics.delay_compensation"
+      ],
+      "expected_chunk_types": [
+        "table"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "coupon-expired",
+      "query": "优惠券过期了可以补发吗",
+      "relevant_unit_ids": [
+        "coupon.expired"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "invoice-issue",
+      "query": "如何开发票",
+      "relevant_unit_ids": [
+        "invoice.issue"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "order-cancel-unpaid",
+      "query": "未支付订单怎么取消",
+      "relevant_unit_ids": [
+        "order.cancel_unpaid"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "order-address-change",
+      "query": "订单未发货前可以修改收货信息吗",
+      "relevant_unit_ids": [
+        "order.address_change"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "return-shipping-fee",
+      "query": "运费由谁承担",
+      "relevant_unit_ids": [
+        "return.shipping_fee"
+      ],
+      "expected_chunk_types": [
+        "table"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "quality-sop-collect-evidence",
+      "query": "质量问题需要提供什么凭证",
+      "relevant_unit_ids": [
+        "quality_issue.sop.collect_evidence"
+      ],
+      "expected_chunk_types": [
+        "sop"
+      ],
+      "expected_parent_ids": [
+        "quality_issue_sop"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "quality-sop-judge-solution",
+      "query": "质量问题怎么判断处理方案",
+      "relevant_unit_ids": [
+        "quality_issue.sop.judge_solution"
+      ],
+      "expected_chunk_types": [
+        "sop"
+      ],
+      "expected_parent_ids": [
+        "quality_issue_sop"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "human-handoff",
+      "query": "什么情况需要升级人工客服",
+      "relevant_unit_ids": [
+        "human.handoff"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "privacy-protect-order",
+      "query": "客服可以查询他人订单和物流轨迹吗",
+      "relevant_unit_ids": [
+        "privacy.protect_order"
+      ],
+      "expected_chunk_types": [
+        "guardrail"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "write-confirmation-required",
+      "query": "修改地址前必须获得用户明确确认吗",
+      "relevant_unit_ids": [
+        "write.confirmation_required"
+      ],
+      "expected_chunk_types": [
+        "guardrail"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "account-security-verification",
+      "query": "客服会索要我的短信验证码吗",
+      "relevant_unit_ids": [
+        "account.security_verification"
+      ],
+      "expected_chunk_types": [
+        "guardrail"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "temporal-refund-policy-change",
+      "query": "退款政策最近有没有变化，十五天无理由还有效吗",
+      "relevant_unit_ids": [
+        "refund.no_reason_15d"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "expected_version": "v2",
+      "expected_previous_version": "v1",
+      "temporal_compare": true,
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-sop-parent",
+      "query": "完整退款处理流程是什么",
+      "relevant_unit_ids": [
+        "refund.sop.parent"
+      ],
+      "expected_chunk_types": [
+        "section_parent"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "quality-sop-parent",
+      "query": "完整质量问题处理流程是什么",
+      "relevant_unit_ids": [
+        "quality_issue.sop.parent"
+      ],
+      "expected_chunk_types": [
+        "section_parent"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-apply-i-want-refund",
+      "query": "我要退款怎么办",
+      "relevant_unit_ids": [
+        "refund.apply"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-apply-order-eligible",
+      "query": "订单 ORD-1001 能不能退款",
+      "relevant_unit_ids": [
+        "refund.apply"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "refund-apply-refund-eta",
+      "query": "退款多久能到账",
+      "relevant_unit_ids": [
+        "refund.apply"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "temporal-invoice-change",
+      "query": "发票开具规则最近有变化吗",
+      "relevant_unit_ids": [
+        "invoice.issue"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "expected_version": "v2",
+      "expected_previous_version": "v1",
+      "temporal_compare": true,
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "temporal-coupon-change",
+      "query": "优惠券补发规则最近有变化吗",
+      "relevant_unit_ids": [
+        "coupon.expired"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "expected_version": "v2",
+      "expected_previous_version": "v1",
+      "temporal_compare": true,
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "temporal-logistics-change",
+      "query": "物流延迟补偿标准最近有变化吗",
+      "relevant_unit_ids": [
+        "logistics.delay_compensation"
+      ],
+      "expected_chunk_types": [
+        "table"
+      ],
+      "expected_version": "v2",
+      "expected_previous_version": "v1",
+      "temporal_compare": true,
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "temporal-handoff-change",
+      "query": "人工升级条件最近有变化吗",
+      "relevant_unit_ids": [
+        "human.handoff"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "expected_version": "v2",
+      "expected_previous_version": "v1",
+      "temporal_compare": true,
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "temporal-cancel-change",
+      "query": "取消订单后库存释放规则最近有变化吗",
+      "relevant_unit_ids": [
+        "order.cancel_unpaid"
+      ],
+      "expected_chunk_types": [
+        "faq"
+      ],
+      "expected_version": "v2",
+      "expected_previous_version": "v1",
+      "temporal_compare": true,
+      "as_of": "2026-08-01T00:00:00Z"
+    },
+    {
+      "id": "boundary-v1-last-moment",
+      "query": "七天无理由退货需要满足什么条件",
+      "relevant_unit_ids": [
+        "refund.no_reason_7d"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "expected_version": "v1",
+      "as_of": "2026-02-28T23:59:59Z"
+    },
+    {
+      "id": "boundary-v2-effective-moment",
+      "query": "十五天无理由退货规则是什么",
+      "relevant_unit_ids": [
+        "refund.no_reason_15d"
+      ],
+      "expected_chunk_types": [
+        "policy_rule"
+      ],
+      "expected_version": "v2",
+      "as_of": "2026-03-01T00:00:00Z"
+    }
+  ]
+}

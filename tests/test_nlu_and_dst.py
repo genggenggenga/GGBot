@@ -191,6 +191,94 @@ class TestDetectIntentFromKeywords:
         assert detect_intent_from_keywords(text) == intent
 
 
+class TestHowToQuestionsRouteToKnowledge:
+    """“怎么/如何/怎样…”这类如何操作问法应走知识 agent（refund_policy/query），
+    而不是被误判为执行请求进入 after_sales。"""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "怎么申请退款",
+            "如何申请退款",
+            "怎样申请退款",
+            "退款怎么申请",
+            "退款怎么弄",
+            "申请退款的流程是什么",
+            "申请退款需要什么材料",
+            "怎么退款",
+            "怎么才能退款",
+        ],
+    )
+    def test_refund_howto_is_refund_policy(self, text):
+        assert detect_intent_from_keywords(text) == "refund_policy"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "怎么申请退货",
+            "怎么退货",
+            "怎么取消订单",
+            "怎么修改地址",
+        ],
+    )
+    def test_other_howto_is_knowledge_query(self, text):
+        assert detect_intent_from_keywords(text) == "query"
+
+    @pytest.mark.parametrize(
+        ("text", "intent"),
+        [
+            ("我要退款", "refund_request"),
+            ("帮我申请退款", "refund_request"),
+            ("我要申请退货", "return_request"),
+            ("帮我取消订单", "cancel_order"),
+        ],
+    )
+    def test_execution_requests_keep_action_intents(self, text, intent):
+        assert detect_intent_from_keywords(text) == intent
+
+    def test_fast_track_routes_refund_howto_to_knowledge(self):
+        ft = fast_track_extract("怎么申请退款")
+        result = build_understanding_from_fast_track(ft, "怎么申请退款")
+        assert result is not None
+        assert result.primary_intent == "refund_policy"
+        assert result.route_to == "knowledge"
+        assert result.confidence >= 0.9
+
+    def test_status_questions_keep_refund_request_route(self):
+        assert detect_intent_from_keywords("怎么还没退款") == "refund_request"
+        assert detect_intent_from_keywords("退款什么时候到账") == "refund_request"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "客服可以查询他人订单信息吗",
+            "客服能查看别人的订单吗",
+            "能否查询他人订单",
+            "机器人可以看到别人的订单明细吗",
+        ],
+    )
+    def test_privacy_questions_route_to_knowledge(self, text):
+        assert detect_intent_from_keywords(text) == "query"
+
+    def test_privacy_fast_track_routes_to_knowledge(self):
+        assert detect_intents_from_keywords(
+            "客服可以查询他人订单信息吗",
+        ) == ["query"]
+        ft = fast_track_extract("客服可以查询他人订单信息吗")
+        result = build_understanding_from_fast_track(
+            ft,
+            "客服可以查询他人订单信息吗",
+        )
+        assert result is not None
+        assert result.primary_intent == "query"
+        assert result.intents == ["query"]
+        assert result.route_to == "knowledge"
+        assert result.confidence >= 0.9
+
+    def test_order_query_still_routes_to_order(self):
+        assert detect_intent_from_keywords("帮我查询我的订单") == "order_query"
+
+
 class TestFastTrackExtract:
     def test_order_id_and_intent(self):
         ft = fast_track_extract("我要退款，订单号 ORD-1001")

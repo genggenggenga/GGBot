@@ -51,7 +51,15 @@ _COMPLAINT_PATTERN = (
     r"|^\s*投诉\s*$"
 )
 _ESCALATION_PATTERN = r"(?:转|找|联系).{0,4}(?:人工|客服)|人工(?:客服|处理)"
-_REFUND_POLICY_PATTERN = r"退款(?:政策|规则|条件|流程|期限|时效|说明)"
+# 咨询类退款意图：规则/条件/流程/时效，以及“怎么申请退款”“退款怎么申请”
+# 等询问如何操作的问题。此类问题应走 knowledge agent，而不是 after_sales。
+_REFUND_POLICY_PATTERN = (
+    r"退款(?:政策|规则|条件|流程|步骤|方法|期限|时效|说明|要求|标准)"
+    r"|(?:怎么|如何|怎样|咋)(?!.{0,6}(?:还没|没有)).{0,10}退款"
+    r"|(?:申请|办理|发起|提交)退款(?:的)?"
+    r"(?:流程|步骤|方法|条件|规则|要求|材料|凭证|需要什么|怎么|如何|怎样)"
+    r"|退款(?:怎么|如何|怎样)(?:申请|办理|发起|提交|退|操作|弄|走)?"
+)
 _REFUND_REQUEST_PATTERN = (
     r"(?:我要|我想|想要|申请|办理|帮我|需要|发起|提交|请求|要求|请)"
     r".{0,20}退款"
@@ -74,6 +82,24 @@ _RETURN_REQUEST_PATTERN = (
 _CANCEL_ORDER_PATTERN = (
     r"(?:取消|撤销|不要).{0,4}(?:这个|该|我的)?订单"
     r"|(?:这个|该|我的)?订单.{0,4}(?:取消|撤销|不要了)"
+)
+
+# 咨询“如何操作”类问法：怎么申请退货/取消订单/修改地址等，归入 query
+# 走 knowledge agent，避免被误判为执行请求进入 after_sales。
+_PROCEDURE_QUERY_PATTERN = (
+    r"(?:怎么|如何|怎样|咋)(?!.{0,6}(?:还没|没有)).{0,10}"
+    r"(?:申请|办理|发起|提交|操作|弄|退)?(?:退货|退款申请)"
+    r"|(?:怎么|如何|怎样|咋).{0,10}取消(?:这个|该|我的)?订单"
+    r"|(?:怎么|如何|怎样|咋).{0,10}(?:改|修改|变更)(?:收货)?地址"
+)
+# 咨询“能否查询他人订单/信息”类隐私问题，归入 query 走 knowledge agent
+# 的 guardrail 知识，而不是被“查询…订单”误判为 order_query。
+_PRIVACY_QUERY_PATTERN = (
+    r"(?:客服|机器人|系统|你们).{0,8}(?:可以|能|能否|能不能|是否|允许|会)"
+    r".{0,10}(?:查询|查看|看到|访问|透露).{0,8}(?:他人|别人|别的用户)?订单"
+    r"|(?:查询|查看|看到).{0,6}(?:他人|别人|别的用户).{0,6}"
+    r"(?:订单|信息|明细|轨迹)"
+    r"|(?:他人|别人|别的用户).{0,4}(?:订单|信息|明细|轨迹)"
 )
 _DELIVERY_POLICY_PATTERN = (
     r"(?:配送|快递|物流).{0,12}(?:一般|通常|几天|多久|费用|收费|政策|说明|时效)"
@@ -100,9 +126,11 @@ _INTENT_KEYWORDS: List[Tuple[re.Pattern, str]] = [
     (re.compile(_ESCALATION_PATTERN), "escalation"),
     (re.compile(_REFUND_POLICY_PATTERN), "refund_policy"),
     (re.compile(_REFUND_REQUEST_PATTERN), "refund_request"),
+    (re.compile(_PROCEDURE_QUERY_PATTERN), "query"),
     (re.compile(_RETURN_REQUEST_PATTERN), "return_request"),
     (re.compile(_CANCEL_ORDER_PATTERN), "cancel_order"),
     (re.compile(_DELIVERY_POLICY_PATTERN), "query"),
+    (re.compile(_PRIVACY_QUERY_PATTERN), "query"),
     (re.compile(_LOGISTICS_QUERY_PATTERN), "logistics_query"),
     (re.compile(_ORDER_QUERY_PATTERN), "order_query"),
 ]
@@ -111,6 +139,9 @@ _EXPLICIT_INTENT_PATTERNS: Dict[str, re.Pattern] = {
     "complaint": re.compile(_COMPLAINT_PATTERN),
     "escalation": re.compile(_ESCALATION_PATTERN),
     "refund_policy": re.compile(_REFUND_POLICY_PATTERN),
+    "query": re.compile(
+        rf"(?:{_PROCEDURE_QUERY_PATTERN})|(?:{_PRIVACY_QUERY_PATTERN})",
+    ),
     "refund_request": re.compile(
         r"(?:我要|我想|想要|申请|办理|帮我|需要|发起|提交|请求|要求|请)"
         r".{0,20}退款",
@@ -199,6 +230,8 @@ def detect_intents_from_keywords(text: str) -> List[str]:
         intents.remove("escalation")
     if "query" in intents and "logistics_query" in intents:
         intents.remove("logistics_query")
+    if "query" in intents and "order_query" in intents:
+        intents.remove("order_query")
     return intents
 
 
