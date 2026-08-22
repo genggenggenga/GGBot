@@ -147,6 +147,36 @@ class SQLitePersistence:
 
                 CREATE INDEX IF NOT EXISTS idx_profile_versions_user_status
                 ON user_profile_versions (user_id, status, created_at);
+
+                CREATE TABLE IF NOT EXISTS tool_executions (
+                    execution_id TEXT PRIMARY KEY,
+                    conv_id TEXT,
+                    user_id TEXT,
+                    trace_id TEXT,
+                    tool_name TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    params_hash TEXT NOT NULL,
+                    params_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_json TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    locked_by TEXT,
+                    locked_until TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    UNIQUE (tool_name, idempotency_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tool_executions_status_lock
+                ON tool_executions (status, locked_until);
+
+                CREATE INDEX IF NOT EXISTS idx_tool_executions_conv_time
+                ON tool_executions (conv_id, updated_at);
                 """
             )
 
@@ -376,6 +406,141 @@ class SQLitePersistence:
             "profile": json.loads(row["profile_json"]),
         }
 
+    def get_tool_execution(
+        self,
+        tool_name: str,
+        idempotency_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM tool_executions
+                WHERE tool_name = ? AND idempotency_key = ?
+                """,
+                (tool_name, idempotency_key),
+            ).fetchone()
+        return _row_to_dict(row)
+
+    def record_tool_execution_running(
+        self,
+        tool_name: str,
+        action_id: str,
+        idempotency_key: str,
+        params_hash: str,
+        params: Dict[str, Any],
+        *,
+        worker_id: str,
+        locked_until: str,
+        context: Optional[Dict[str, Any]] = None,
+        max_attempts: int = 3,
+    ) -> None:
+        now = _now()
+        context = context or {}
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO tool_executions (
+                    execution_id, conv_id, user_id, trace_id, tool_name,
+                    action_id, idempotency_key, params_hash, params_json,
+                    status, attempt_count, max_attempts, locked_by,
+                    locked_until, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(tool_name, idempotency_key) DO UPDATE SET
+                    status = CASE
+                        WHEN tool_executions.status = 'succeeded'
+                        THEN tool_executions.status ELSE 'running'
+                    END,
+                    attempt_count = CASE
+                        WHEN tool_executions.status = 'succeeded'
+                        THEN tool_executions.attempt_count
+                        ELSE tool_executions.attempt_count + 1
+                    END,
+                    locked_by = CASE
+                        WHEN tool_executions.status = 'succeeded'
+                        THEN tool_executions.locked_by ELSE excluded.locked_by
+                    END,
+                    locked_until = CASE
+                        WHEN tool_executions.status = 'succeeded'
+                        THEN tool_executions.locked_until ELSE excluded.locked_until
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(uuid.uuid4()),
+                    context.get("conv_id"),
+                    context.get("user_id"),
+                    context.get("trace_id"),
+                    tool_name,
+                    action_id,
+                    idempotency_key,
+                    params_hash,
+                    _json_dumps(params),
+                    max_attempts,
+                    worker_id,
+                    locked_until,
+                    now,
+                    now,
+                ),
+            )
+
+    def complete_tool_execution(
+        self,
+        tool_name: str,
+        idempotency_key: str,
+        status: str,
+        *,
+        result: Any = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        now = _now()
+        completed_at = now if status in {"succeeded", "failed_terminal"} else None
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE tool_executions
+                SET status = ?,
+                    result_json = ?,
+                    error_code = ?,
+                    error_message = ?,
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    updated_at = ?,
+                    completed_at = COALESCE(?, completed_at)
+                WHERE tool_name = ? AND idempotency_key = ?
+                """,
+                (
+                    status,
+                    _json_dumps(result) if result is not None else None,
+                    error_code,
+                    error_message,
+                    now,
+                    completed_at,
+                    tool_name,
+                    idempotency_key,
+                ),
+            )
+
+    def list_recoverable_tool_executions(
+        self,
+        *,
+        now: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        cutoff = now or _now()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM tool_executions
+                WHERE status IN ('running', 'unknown', 'failed_retryable')
+                  AND (locked_until IS NULL OR locked_until <= ?)
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows if row is not None]
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -389,3 +554,9 @@ def _checkpoint_status(execution_state: str) -> str:
     if execution_state in {"clarifying", "awaiting_confirmation"}:
         return "awaiting_user"
     return "running"
+
+
+def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    return {key: row[key] for key in row.keys()}

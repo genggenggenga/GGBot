@@ -271,6 +271,9 @@ async def _runtime_components(app: FastAPI):
     action_repository = RedisActionExecutionRepository(
         redis_client,
         ttl_s=int(os.getenv("ACTION_IDEMPOTENCY_TTL_S", "86400")),
+        durable_store=_persistence,
+        worker_id=os.getenv("GGBOT_WORKER_ID") or None,
+        max_attempts=int(os.getenv("ACTION_MAX_ATTEMPTS", "3")),
     )
     register_internal_rpc_tools(
         registry,

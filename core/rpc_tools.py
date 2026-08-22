@@ -140,7 +140,6 @@ def _register_rpc_tool(
         _method=method,
         _spec=spec,
     ) -> Any:
-        del context
         arguments = dict(params)
         if _spec.tool_type == ToolType.READ:
             return await _method(**arguments)
@@ -150,6 +149,7 @@ def _register_rpc_tool(
             action_id,
             arguments,
             lambda: _method(**arguments),
+            context=context if isinstance(context, dict) else None,
         )
 
     registry.register(LocalToolAdapter(spec, handler))
